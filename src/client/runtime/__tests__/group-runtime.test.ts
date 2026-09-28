@@ -304,8 +304,14 @@ describe("GroupRuntime publish failure", () => {
     );
     expect(failed).toBeDefined();
     const publish = vi.fn(async () => noAckResponse());
-    const { runtime, confirmPublished, publishFailed, save, deliver, deliverMany } =
-      makeRuntime({ getNetwork: () => makeNetwork(publish) });
+    const {
+      runtime,
+      confirmPublished,
+      publishFailed,
+      save,
+      deliver,
+      deliverMany,
+    } = makeRuntime({ getNetwork: () => makeNetwork(publish) });
 
     await expect(
       runtime.publishWork(

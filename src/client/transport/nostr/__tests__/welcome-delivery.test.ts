@@ -167,9 +167,7 @@ describe("NostrWelcomeDelivery.deliverMany", () => {
       recipients: [first, second],
     });
 
-    const giftWraps = mockNetwork.events.filter(
-      (event) => event.kind === 1059,
-    );
+    const giftWraps = mockNetwork.events.filter((event) => event.kind === 1059);
     expect(giftWraps).toHaveLength(2);
 
     const recipientOf = (event: NostrEvent) =>

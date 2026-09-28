@@ -487,7 +487,8 @@ export class GroupRuntime {
           failed.length,
           recipients.length,
           failed.map(
-            (outcome) => `${outcome.recipient.pubkey.slice(0, 16)}...: ${outcome.error}`,
+            (outcome) =>
+              `${outcome.recipient.pubkey.slice(0, 16)}...: ${outcome.error}`,
           ),
         );
       }
