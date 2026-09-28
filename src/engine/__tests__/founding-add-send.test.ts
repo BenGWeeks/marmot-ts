@@ -27,6 +27,12 @@
  *   founding-creation exception": a founding Add "has no group-message
  *   publication obligation because no pre-existing peer needs it".
  * @see .planning/phases/10-founding-group-creation-via-welcome/10-01-PLAN.md
+ *
+ *  - CR-03: `case "foundingAdd"` invocation legality -- the public `./engine`
+ *    surface refuses `foundingAdd` unless the group is a one-member epoch-0
+ *    group with no unapplied proposals and a non-empty, all-Add proposal
+ *    set, before any commit is built (10-REVIEW.md / 10-VERIFICATION.md
+ *    truth 2, FOUND-02 "PARTIAL").
  */
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
@@ -285,5 +291,203 @@ describe('MarmotGroupEngine#send case "foundingAdd"', () => {
     if (result.kind !== "foundingGroupCreated") throw new Error("unreachable");
 
     expect(result.welcome.welcome.secrets).toHaveLength(2);
+  });
+});
+
+describe("foundingAdd invocation guard (CR-03)", () => {
+  it("CR-03: refuses foundingAdd on a group already past epoch 0 (the live-group silent-fork case) and leaves state unchanged", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const invitee1 = await inviteeKeyPackage(9, impl);
+    const founding = await engine.send({
+      kind: "foundingAdd",
+      actorPubkey: adminPubkey,
+      extraProposals: [proposeInviteUser(invitee1.publicPackage)],
+    });
+    if (founding.kind !== "foundingGroupCreated")
+      throw new Error("unreachable");
+    engine.confirmPublished(founding.pending);
+    expect(Number(engine.state.groupContext.epoch)).toBe(1);
+
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+    const wrapCountBefore = wrapCount();
+    const invitee2 = await inviteeKeyPackage(11, impl);
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [proposeInviteUser(invitee2.publicPackage)],
+      }),
+    ).rejects.toThrow(/foundingAdd: only legal at epoch 0/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(wrapCountBefore);
+
+    // A following selfUpdate is not blocked as PendingPublish.
+    const selfUpdateResult = await engine.send({ kind: "selfUpdate" });
+    expect(selfUpdateResult.kind).toBe("selfUpdate");
+  });
+
+  it("CR-03: refuses foundingAdd when the tree holds more than the local member, even at epoch 0", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler: peeler1 } = countingPeeler(impl);
+    const engine1 = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler: peeler1,
+    });
+    const invitee1 = await inviteeKeyPackage(9, impl);
+    const founding = await engine1.send({
+      kind: "foundingAdd",
+      actorPubkey: adminPubkey,
+      extraProposals: [proposeInviteUser(invitee1.publicPackage)],
+    });
+    if (founding.kind !== "foundingGroupCreated")
+      throw new Error("unreachable");
+    engine1.confirmPublished(founding.pending);
+    const twoMemberEpoch1State = engine1.state;
+
+    const { peeler: peeler2, wrapCount } = countingPeeler(impl);
+    const engine2 = new MarmotGroupEngine({
+      state: {
+        ...twoMemberEpoch1State,
+        groupContext: { ...twoMemberEpoch1State.groupContext, epoch: 0n },
+      },
+      ciphersuite: impl,
+      peeler: peeler2,
+    });
+    const stateBefore = engine2.state;
+    const historySizeBefore = engine2.history.size;
+    const invitee2 = await inviteeKeyPackage(2, impl);
+
+    await expect(
+      engine2.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [proposeInviteUser(invitee2.publicPackage)],
+      }),
+    ).rejects.toThrow(/foundingAdd: requires a one-member group/);
+
+    expect(engine2.state).toBe(stateBefore);
+    expect(engine2.lifecycle).toBe("Stable");
+    expect(engine2.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
+  });
+
+  it("CR-03: refuses foundingAdd while unapplied proposals are staged", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: {
+        ...epoch0,
+        unappliedProposals: {
+          staged: {
+            proposal: {
+              proposalType: defaultProposalTypes.remove,
+              remove: { removed: 0 },
+            },
+            senderLeafIndex: 0,
+          },
+        },
+      },
+      ciphersuite: impl,
+      peeler,
+    });
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+    const invitee = await inviteeKeyPackage(9, impl);
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [proposeInviteUser(invitee.publicPackage)],
+      }),
+    ).rejects.toThrow(/foundingAdd: requires no unapplied proposals/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
+  });
+
+  it("CR-03: refuses foundingAdd carrying a non-Add proposal, by value or via a ProposalAction", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+    const invitee = await inviteeKeyPackage(9, impl);
+    const removeLiteral = {
+      proposalType: defaultProposalTypes.remove,
+      remove: { removed: 0 },
+    } as const;
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [
+          proposeInviteUser(invitee.publicPackage),
+          removeLiteral,
+        ],
+      }),
+    ).rejects.toThrow(/foundingAdd: may only carry Add proposals/);
+
+    // Same regex via a ProposalAction resolving to the same Remove literal --
+    // proves the check runs on RESOLVED proposals, not on the raw intent shape.
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [
+          proposeInviteUser(invitee.publicPackage),
+          async () => removeLiteral,
+        ],
+      }),
+    ).rejects.toThrow(/foundingAdd: may only carry Add proposals/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
+  });
+
+  it("CR-03: refuses foundingAdd with no proposals", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [],
+      }),
+    ).rejects.toThrow(/foundingAdd: requires at least one Add proposal/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
   });
 });

@@ -1208,6 +1208,45 @@ export class MarmotGroupEngine<TEnvelope> {
           );
         }
 
+        // CR-03 (10-REVIEW.md / 10-VERIFICATION.md truth 2, FOUND-02
+        // "PARTIAL"): `SendIntent` is public through the `./engine` subpath,
+        // so this cannot rely on `GroupFactory` being the only caller. Per
+        // refs/marmot/protocol-core/publish-lifecycle.md line 77, "the
+        // empty-obligation exception is limited to the epoch-0 creation and,
+        // when applicable, its immediately following founding Add Commit" --
+        // every subsequent Commit follows the normal publish-before-apply
+        // rule. MDK keeps the founding Add internal to `do_create_group`
+        // (refs/mdk/crates/cgka-engine/src/group_lifecycle.rs), so that
+        // invariant is structural there; here it must be enforced in the
+        // case itself. Every check below runs before any await, any
+        // proposal resolution and any `createCommit`, so a refusal leaves no
+        // staged state, no lifecycle transition and no
+        // `#stagedCommitParentEpoch` pin -- invoked on a live group past
+        // epoch 0, this is exactly the public-surface silent-fork hazard
+        // CR-03 closes.
+        if (this.state.groupContext.epoch !== 0n) {
+          throw new Error(
+            `foundingAdd: only legal at epoch 0 (the founding-creation exception); group is at epoch ${this.state.groupContext.epoch}`,
+          );
+        }
+        const occupiedLeaves = this.#occupiedLeafIndices();
+        if (
+          occupiedLeaves.length !== 1 ||
+          occupiedLeaves[0] !== Number(this.state.privatePath.leafIndex)
+        ) {
+          throw new Error(
+            `foundingAdd: requires a one-member group whose sole leaf is the local member; tree has ${occupiedLeaves.length} occupied leaves`,
+          );
+        }
+        const unappliedCount = Object.keys(
+          this.state.unappliedProposals,
+        ).length;
+        if (unappliedCount > 0) {
+          throw new Error(
+            `foundingAdd: requires no unapplied proposals; ${unappliedCount} staged`,
+          );
+        }
+
         const context: ProposalContext = {
           state: this.state,
           ciphersuite: this.ciphersuite,
@@ -1223,8 +1262,29 @@ export class MarmotGroupEngine<TEnvelope> {
           }
         }
 
-        // No `proposalRefs` handling here: the intent has no such field — at
-        // epoch 0 there are no staged proposals to bundle by reference.
+        // No `proposalRefs` handling here: the intent has no such field, and
+        // this is now enforced above -- the no-unapplied-proposals check
+        // means there are no staged proposals to bundle by reference at the
+        // point a foundingAdd is legal to invoke (CR-03).
+
+        // CR-03: the Add-only rule applies to the intent's own, resolved
+        // proposals only -- NOT to `prepared.extraProposals` /
+        // `prepared.committedProposals` below, which may gain an
+        // engine-generated admin-policy splice (`#adminPolicySpliceFor` via
+        // `#prepareOutboundCommitProposals`). That splice is not
+        // caller-supplied and remains validated by the shared
+        // `#assertStagedCommitLegal` gate.
+        if (newProposals.length === 0) {
+          throw new Error("foundingAdd: requires at least one Add proposal");
+        }
+        const nonAddProposal = newProposals.find(
+          (p) => p.proposalType !== defaultProposalTypes.add,
+        );
+        if (nonAddProposal) {
+          throw new Error(
+            `foundingAdd: may only carry Add proposals; got proposal type ${nonAddProposal.proposalType}`,
+          );
+        }
 
         const prepared = this.#prepareOutboundCommitProposals(
           this.state,

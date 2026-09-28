@@ -141,6 +141,14 @@ export type SendIntent =
        * `extraProposals` is required: a founding Add with no Add proposals
        * has no reason to exist. There is no `proposalRefs` field — at epoch 0
        * there are no staged proposals to bundle by reference.
+       *
+       * CR-03: the engine refuses this intent — throwing before any commit
+       * is built, with no state change — unless the group is at epoch 0,
+       * the local member is the sole occupied leaf, there are no unapplied
+       * proposals, and `extraProposals` resolves to at least one proposal,
+       * all of them Adds. `refs/marmot/protocol-core/publish-lifecycle.md`
+       * line 77 limits the empty-publication-obligation exception to epoch 0
+       * and its immediately following founding Add Commit.
        */
       kind: "foundingAdd";
       actorPubkey: string;
