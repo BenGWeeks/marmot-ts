@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 7. Account Identity Proof Component (0x8009) + Clean Cut   | v2.0      | 8/8 | Complete    | 2026-09-14 |
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
-| 10. Founding Group Creation via Welcome                    | v2.0      | 7/7 | Complete   | 2026-09-28 |
+| 10. Founding Group Creation via Welcome                    | v2.0      | 7/7 | Complete    | 2026-09-28 |
 | 11. Interop Fixtures, Exports Snapshot & QA Gate           | v2.0      | 0/TBD           | Not started | -          |
 
 ## Backlog
@@ -250,7 +250,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 
 **Goal:** [Captured for future planning] — verify group image (avatar) support end-to-end so downstream apps can read/display and update a group's image. Likely touches the group image/avatar-url (0x8007) extension and the group metadata surface.
 **Requirements:** TBD
-**Plans:** 4/4 plans complete
+**Plans:** 7/7 plans complete
 
 Plans:
 
