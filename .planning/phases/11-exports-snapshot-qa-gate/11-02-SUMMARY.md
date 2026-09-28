@@ -145,6 +145,13 @@ None — no external service configuration required.
 - QA-04's package-smoke leg of the D-06 gate is fixed and green on Node, Bun, and Deno locally (`bash scripts/package-smoke/run.sh` → `package-smoke: PASSED`). The remaining QA-04/D-06 gate items (`pnpm vitest run` on the full suite across all local runtimes, `pnpm build`, `pnpm lint`) are this phase's other plans' scope, not re-verified exhaustively here beyond what these two tasks' own verification touched (`pnpm exec tsc -p tsconfig.json --noEmit`, `pnpm exec prettier --check`, and `pnpm build` as a precondition for the package smoke).
 - No blockers for the phase's remaining plans (D-08/D-09/D-10 chores, and the phase-level verification pass).
 
+## Self-Check: PASSED
+
+- FOUND: `src/__tests__/exports.test.ts`
+- FOUND: `scripts/package-smoke/smoke.mjs`
+- FOUND commit: `a3fbe1e` (test(11): snapshot every public subpath and guard against legacy proof exports)
+- FOUND commit: `e736c70` (fix(11): give package-smoke a real AuthorizationProofSigner)
+
 ---
 *Phase: 11-exports-snapshot-qa-gate*
 *Completed: 2026-09-28*
