@@ -55,9 +55,8 @@ For a complete walkthrough of setting up storage and network interfaces, see the
 When you create a group, the client:
 
 1. Generates the initial MLS group state with your user as the only member
-2. Publishes a group event (kind 445) to your specified relays
-3. Saves the group state to your storage backend
-4. Returns a `MarmotGroup` instance you can immediately use
+2. Saves the group state to your storage backend — no group event (kind 445) is published, because epoch 0 carries an empty publication obligation: there are no existing peers to notify yet
+3. Returns a `MarmotGroup` instance you can immediately use
 
 ```typescript
 const group = await client.groups.create("Team Chat", {
@@ -68,6 +67,24 @@ const group = await client.groups.create("Team Chat", {
 ```
 
 Learn more: [Groups in Core Module](/core/groups)
+
+### Founding creation with initial invitees
+
+Passing `invitees` — an array of published KeyPackage events (kind 30443) — turns `create()` into a **founding creation**: one Add commit carrying every invitee is merged **locally** to epoch 1, so all invitees are members immediately. Like the solo case above, this founding commit publishes **no** group event; the empty publication obligation extends to it too, because no pre-existing peer needs to see it. The client then attempts to send each invitee an independently retryable Welcome.
+
+```typescript
+const group = await client.groups.create("Team Chat", {
+  relays: ["wss://relay.example.com"],
+  adminPubkeys: [myPubkey],
+  invitees: [aliceKeyPackageEvent, bobKeyPackageEvent],
+});
+// `group` is already Stable at epoch 1 with alice and bob as members.
+```
+
+Two consequences of this design are worth understanding before you rely on it:
+
+- **Always supply `relays` when you supply `invitees`.** Every Welcome rumor is required to carry a non-empty list of the group's relays (so the joiner knows where to find future group traffic) — if you omit `relays`, Welcome delivery **fails for every invitee**, not just invitees who happen to lack their own published NIP-65 inbox relays. The founding commit still merges locally either way (the invitees are members at epoch 1), but nobody is ever notified, and — independently — a group created without relays has no Nostr routing component and can never carry ordinary group traffic afterward. There is no recovery path for a relays-less founding create other than re-inviting every member once the group has relays.
+- **The delivery outcome is discoverable state, not a return value.** `create()` never throws because a Welcome failed to reach an invitee — the group exists at epoch 1 with every member regardless of delivery success. You must check the report yourself; see [`MarmotGroup`'s Welcome delivery section](/client/marmot-group#founding-welcome-delivery-and-retry) for the API and the recovery path (re-inviting with a fresh KeyPackage).
 
 ### Joining an Existing Group
 
