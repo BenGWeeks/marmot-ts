@@ -202,3 +202,10 @@ None - no external service configuration required.
 ---
 *Phase: 11-exports-snapshot-qa-gate*
 *Completed: 2026-09-28*
+
+## Self-Check: PASSED
+
+- Task 1 commit `7837d95` — FOUND in `git log --oneline`
+- Task 2 commit `e857449` — FOUND in `git log --oneline`
+- SUMMARY.md — FOUND on disk at `.planning/phases/11-exports-snapshot-qa-gate/11-01-SUMMARY.md`
+- `src/core/components/account-identity-proof.ts` — FOUND on disk
