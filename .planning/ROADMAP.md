@@ -182,7 +182,7 @@ during planning (`/gsd-plan-phase --research-phase 10`).
 4. Each invitee's Welcome is delivered independently; a failed delivery is retryable per invitee and never rolls back the group.
 5. An invitee who receives their Welcome joins at epoch 1 and can exchange messages with the creator.
 
-**Plans**: 2/4 plans executed
+**Plans**: 3/4 plans executed
 
 Plans:
 **Wave 1**
@@ -192,7 +192,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 10-03-PLAN.md — Founding orchestration: `options.invitees`, per-invitee intents, send+confirm, one-Welcome-per-invitee guard, single durable write, per-invitee retry state
+- [x] 10-03-PLAN.md — Founding orchestration: `options.invitees`, per-invitee intents, send+confirm, one-Welcome-per-invitee guard, single durable write, per-invitee retry state
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -235,7 +235,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 7. Account Identity Proof Component (0x8009) + Clean Cut   | v2.0      | 8/8 | Complete    | 2026-09-14 |
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
-| 10. Founding Group Creation via Welcome                    | v2.0      | 2/4 | In Progress|  |
+| 10. Founding Group Creation via Welcome                    | v2.0      | 3/4 | In Progress|  |
 | 11. Interop Fixtures, Exports Snapshot & QA Gate           | v2.0      | 0/TBD           | Not started | -          |
 
 ## Backlog
