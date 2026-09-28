@@ -145,6 +145,13 @@ None - no external service configuration required.
 - CR-02 (`deliverMany()` misclassifies zero-ack Welcome publishes as succeeded) and CR-03 (the engine's public `foundingAdd` `SendIntent` has no epoch-0/sole-leaf/Add-only invocation guard) remain open — they are explicitly out of scope for this plan (10-05 covers CR-01 only) and are the responsibility of sibling plans 10-06 and 10-07, executed in parallel in the same wave.
 - REQUIREMENTS.md still marks FOUND-02 and FOUND-04 as needing reopening per 10-VERIFICATION.md's recommendation; this plan does not touch FOUND-02/FOUND-04 scope (those trace to CR-02/CR-03, not CR-01) and defers their REQUIREMENTS.md status update to the orchestrator's post-wave consolidation.
 
+## Self-Check: PASSED
+
+- FOUND: src/client/group-factory.ts
+- FOUND: .planning/phases/10-founding-group-creation-via-welcome/10-05-SUMMARY.md
+- FOUND: b7e0ee2 (Task 1 commit)
+- FOUND: ed3205a (Task 2 commit)
+
 ---
 
 *Phase: 10-founding-group-creation-via-welcome*
