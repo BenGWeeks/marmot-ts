@@ -24,7 +24,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** A downstream client can join a Marmot group and exchange messages that interoperate, byte-for-byte, with any spec-conformant peer (incl. the Rust MDK reference), across every supported runtime.
-**Current focus:** Phase 11 — exports-snapshot-qa-gate
+**Current focus:** Phase 11 — Exports Snapshot & QA Gate (exports-snapshot-qa-gate)
 
 ## Current Position
 
