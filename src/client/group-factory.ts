@@ -36,6 +36,7 @@ import { NostrGroupPeeler } from "./group/nostr-peeler.js";
 import type { WelcomeRecipient } from "./transport/nostr/welcome-delivery.js";
 import { defaultVerifyEvent, type VerifyEventMethod } from "./verify.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
+import { isValidRelayUrl } from "../utils/relay-url.js";
 
 /** Options accepted by {@link GroupFactory}. */
 export type GroupFactoryOptions<
@@ -83,12 +84,13 @@ export type CreateGroupOptions = SimpleGroupOptions & {
    * 21-30 — the founding-creation exception). Omitting `invitees` keeps
    * today's exact solo-create behaviour and code path.
    *
-   * D-09 footgun: an invitee list with no `relays` supplied is a supported
-   * case, not an error — but the resulting group then has no
-   * `transport.nostr.routing` component, so it can never carry ordinary
-   * group traffic afterwards. A successful founding create can still produce
-   * a group that is unusable for messaging; Welcome delivery in that case
-   * depends entirely on each recipient's own published NIP-65 inbox relays.
+   * When `invitees` is non-empty, `relays` MUST be a non-empty list of valid
+   * ws/wss relay URLs, otherwise `create()` throws before generating any key
+   * material, building any MLS state or writing to any store (CR-01,
+   * supersedes D-09 — see 10-VERIFICATION.md). The reason: every Welcome
+   * rumor must carry a non-empty `relays` tag (`createWelcomeRumor()`), and a
+   * group without a Nostr routing component can never publish. A solo create
+   * (`invitees` omitted or empty) may still omit `relays`.
    */
   invitees?: NostrEvent[];
 };
@@ -172,11 +174,17 @@ export class GroupFactory<
    * per invitee (D-13), and Welcomes are fanned out directly, bypassing
    * `GroupRuntime` (D-05/D-07/D-12). Only one durable write occurs either
    * way (D-03): omitting `invitees` keeps today's exact solo-create result.
+   *
+   * A founding create first validates the group relays (CR-01) and refuses
+   * before any state exists when `invitees` is non-empty and `relays` is
+   * absent, empty, or contains an invalid relay URL.
    */
   async create(
     name: string,
     options?: CreateGroupOptions,
   ): Promise<MarmotGroup<THistory, TMedia>> {
+    assertFoundingInviteeRelays(options?.invitees, options?.relays);
+
     const ciphersuiteImpl = await this.#getCiphersuiteImpl(
       options?.ciphersuite,
     );
@@ -359,6 +367,50 @@ export class GroupFactory<
       welcome: result.welcome.welcome,
       recipients,
     };
+  }
+}
+
+/**
+ * CR-01 (10-VERIFICATION.md, supersedes D-09): the base refusal message for
+ * a founding create whose invitees cannot possibly receive a Welcome.
+ * `createWelcomeRumor()` (`src/core/welcome-event.ts`) throws unconditionally
+ * for every recipient when the group's relay list is empty, and a group with
+ * no `transport.nostr.routing` component (only pushed when `relays.length >
+ * 0`, see `src/core/group.ts`) can never publish afterwards — so a relay-less
+ * founding create can only ever produce a permanently unusable group with
+ * phantom members. Declared once and referenced at both throw sites below so
+ * the literal appears exactly once in this file.
+ */
+const FOUNDING_RELAYS_REQUIRED =
+  "GroupFactory.create: founding invitees require a non-empty list of valid group relays (every Welcome rumor must carry a relays tag, and a relay-less group can never publish)";
+
+/**
+ * CR-01 (10-VERIFICATION.md, supersedes D-09): fails closed, before any key
+ * material is generated, any MLS state is built, or any store is written,
+ * when `invitees` is non-empty and `relays` is absent, empty, or contains an
+ * invalid (non-ws/wss, empty, or unparseable) relay URL. A solo create
+ * (`invitees` undefined or empty) is unaffected — this mirrors the existing
+ * founding condition `invitees && invitees.length > 0` in `create()`.
+ * Duplicate relays are deliberately NOT rejected here: `encodeNostrRoutingV1`
+ * already dedupes them (`src/core/components/nostr-routing.ts`) and
+ * `MarmotGroup.relays` is read back from that deduped component, so
+ * duplicates cannot cause the Welcome failure this guard exists to prevent.
+ */
+function assertFoundingInviteeRelays(
+  invitees: NostrEvent[] | undefined,
+  relays: string[] | undefined,
+): void {
+  if (!invitees || invitees.length === 0) return;
+
+  if (!relays || relays.length === 0) {
+    throw new Error(FOUNDING_RELAYS_REQUIRED);
+  }
+  for (const relay of relays) {
+    if (!isValidRelayUrl(relay)) {
+      throw new Error(
+        `${FOUNDING_RELAYS_REQUIRED} — invalid relay: ${JSON.stringify(relay)}`,
+      );
+    }
   }
 }
 

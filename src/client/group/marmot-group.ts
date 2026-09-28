@@ -735,10 +735,12 @@ export class MarmotGroup<
    *
    * Never throws and never saves: partial or total Welcome failure is a
    * normal outcome (D-12), reported through {@link pendingWelcomes} rather
-   * than raised. Passing an empty group-relay list is expected and supported
-   * (D-09) — delivery then depends entirely on each recipient's NIP-65 inbox
-   * relays, which `deliver` already resolves; a recipient with no published
-   * inbox relay list fails independently of the others.
+   * than raised. `GroupFactory.create` refuses a founding create without
+   * valid group relays (CR-01), so on the factory path this group always
+   * carries relays; the group-relay list is forwarded both as each Welcome
+   * rumor's required relays tag and as `deliver`'s inbox-lookup fallback, and
+   * a recipient whose own inbox lookup resolves empty still fails
+   * independently of the others.
    */
   async deliverFoundingWelcomes(options: {
     welcome: Welcome;
@@ -768,9 +770,9 @@ export class MarmotGroup<
    * Deliberately has **no epoch guard**: RESEARCH Priority Finding #1
    * establishes that a late epoch-1 Welcome is safe because the joiner's
    * backfill (`GroupsManager#connectGroup`) has no `since` bound, **provided
-   * the group has relays**. A relay-less founding group (D-09/R-05) can never
-   * carry group traffic at all, so a late Welcome there leaves the joiner
-   * permanently at epoch 1.
+   * the group has relays**. `GroupFactory.create` no longer produces
+   * relay-less founding groups (CR-01), so on the factory path the relays
+   * precondition always holds.
    */
   async retryWelcome(pubkey: string): Promise<WelcomeDeliveryOutcome> {
     const index = this.#welcomeDeliveries.findIndex(
