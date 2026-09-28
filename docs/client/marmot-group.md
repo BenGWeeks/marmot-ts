@@ -135,6 +135,31 @@ await client.groups.commit(group.id, {
 
 A standalone (uncommitted) proposal can be broadcast with `group.propose(action)` / `group.sendProposal(proposal)`, and a key rotation with `group.selfUpdate()`.
 
+## Founding Welcome delivery and retry
+
+When a group is founding-created with `invitees` (see [`client.groups.create`](/client/marmot-client#founding-creation-with-initial-invitees)), each invitee's Welcome is delivered independently and the outcome is exposed as discoverable state on the group — `create()` itself never throws on a failed delivery:
+
+```typescript
+group.welcomeDeliveries; // every attempted delivery, in order: { kind: "succeeded" | "failed", recipient, ... }[]
+group.pendingWelcomes; // the failed subset still needing delivery
+```
+
+Check `pendingWelcomes` after a founding create and retry each entry:
+
+```typescript
+for (const outcome of group.pendingWelcomes) {
+  await group.retryWelcome(outcome.recipient.pubkey);
+}
+```
+
+`retryWelcome(pubkey)` semantics:
+
+- An unknown `pubkey` (never an invitee of this founding create) throws — it fails loudly rather than silently no-opping.
+- A `pubkey` whose Welcome already succeeded returns the existing outcome unchanged, without re-publishing.
+- The report is **not persisted**: `welcomeDeliveries` / `pendingWelcomes` are in-memory only and empty again after a restart or a fresh load of the group, even though the invitee remains a member who was never told.
+
+The only recovery for a Welcome that was never delivered (before or after a restart) is to re-invite that member with a **fresh KeyPackage** against the now-canonical group (`refs/marmot/protocol-core/publish-lifecycle.md`) — the original KeyPackage material a founding create consumed is not restorable.
+
 ## Events
 
 `MarmotGroup` extends `EventEmitter`. Available events:
