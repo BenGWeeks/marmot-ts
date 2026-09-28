@@ -41,7 +41,7 @@ export async function createGroupEvent(
     tags: [[nostrTransportBinding.groupIdTag, groupId]],
   };
 
-  // Ephemeral keypair for signing — distinct from the encryption keypair (MIP-03)
+  // Ephemeral keypair for signing — distinct from the encryption keypair (`transports/nostr.md`: fresh per-event ephemeral key)
   const ephemeralSecretKey = generateSecretKey();
 
   return finalizeEvent(draft, ephemeralSecretKey);

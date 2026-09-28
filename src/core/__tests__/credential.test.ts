@@ -232,7 +232,7 @@ describe("credential integration", () => {
     expect(credential1.credentialType).toBe(credential2.credentialType);
   });
 
-  it("marmotAuthService accepts valid MIP-00 basic credentials", async () => {
+  it("marmotAuthService accepts valid basic credentials (foundation/identity.md)", async () => {
     const credential = createCredential(validPubkey);
     await expect(
       marmotAuthService.validateCredential(credential, new Uint8Array(32)),

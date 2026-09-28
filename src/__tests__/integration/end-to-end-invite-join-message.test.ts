@@ -140,7 +140,7 @@ describe("End-to-end: invite, join, first message", () => {
     });
 
     // Invitee joins at the same epoch as admin (no automatic self-update).
-    // MIP-02 self-update is the caller's responsibility.
+    // The post-join self-update (`protocol-core/joining.md`) is the caller's responsibility.
     expect(inviteeGroup.state.groupContext.epoch).toBe(
       adminGroup.state.groupContext.epoch,
     );

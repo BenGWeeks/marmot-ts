@@ -667,7 +667,7 @@ describe("KeyPackageManager", () => {
       expect(result).toBe(false);
     });
 
-    it("rejects an event whose `i` tag does not match the decoded KeyPackage (MIP-00)", async () => {
+    it("rejects an event whose `i` tag does not match the decoded KeyPackage (transports/nostr.md)", async () => {
       const { manager } = makeManager(network, account, TEST_CLIENT_ID);
       await manager.create({ relays: ["wss://relay.test"] });
       const realEvent = network.events.find(
