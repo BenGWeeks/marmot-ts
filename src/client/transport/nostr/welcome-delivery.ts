@@ -5,7 +5,7 @@ import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { Welcome } from "ts-mls";
 
 import { createWelcomeRumor } from "../../../core/welcome.js";
-import { createGiftWrap } from "../../../utils/index.js";
+import { createGiftWrap, hasAck } from "../../../utils/index.js";
 import type {
   NostrNetworkInterface,
   PublishResponse,
@@ -39,6 +39,11 @@ export type DeliverWelcomeOptions = {
  * FOUND-04: a Welcome "succeeds or fails independently and does not affect
  * canonical group state"
  * (refs/marmot/protocol-core/publish-lifecycle.md lines 66-78).
+ *
+ * `succeeded` means at least one relay acknowledged (`ok: true`) the
+ * gift-wrapped Welcome. `failed` covers both a thrown delivery attempt and a
+ * publish that fulfilled but no relay acknowledged (CR-02,
+ * 10-VERIFICATION.md).
  */
 export type WelcomeDeliveryOutcome =
   | {
@@ -122,6 +127,13 @@ export class NostrWelcomeDelivery {
    * outcome, not an error — see
    * refs/marmot/protocol-core/publish-lifecycle.md lines 66-78 ("succeeds or
    * fails independently and does not affect canonical group state").
+   *
+   * A fulfilled publish is only classified `succeeded` when the shared
+   * `hasAck` helper (`src/utils/nostr.ts`) reports at least one acknowledging
+   * relay — the same required-ack rule {@link GroupRuntime} applies to group
+   * events. A fulfilled publish where no relay acknowledged is classified
+   * `failed` (CR-02, 10-VERIFICATION.md), so an unacknowledged invitee stays
+   * visible to `pendingWelcomes` and retryable (FOUND-04).
    */
   async deliverMany(
     options: DeliverManyWelcomesOptions,
@@ -139,8 +151,19 @@ export class NostrWelcomeDelivery {
 
     return settled.map((result, index) => {
       const recipient = options.recipients[index]!;
-      if (result.status === "fulfilled")
-        return { kind: "succeeded", recipient, response: result.value };
+      if (result.status === "fulfilled") {
+        if (hasAck(result.value))
+          return { kind: "succeeded", recipient, response: result.value };
+
+        const rejections = Object.values(result.value)
+          .filter((r) => !r.ok)
+          .map((r) => `${r.from}: ${r.message ?? "rejected"}`)
+          .join("; ");
+        const error =
+          `No relay accepted the Welcome` +
+          (rejections ? ` (${rejections})` : "");
+        return { kind: "failed", recipient, error };
+      }
       const error =
         result.reason instanceof Error
           ? result.reason.message
