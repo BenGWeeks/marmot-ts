@@ -67,7 +67,6 @@ Per `protocol-core/joining.md` founding-creation exception and MDK `SendResult::
 
 ### Interop and quality (QA)
 
-- [ ] **QA-03**: A Rust-signed MDK Current-profile KeyPackage carrying a `0x8009` proof verifies in marmot-ts as a pinned fixture
 - [ ] **QA-04**: The full suite is green on Node 20/22/24, Deno 2, and Bun latest/1.1
 - [ ] **QA-05**: The public exports snapshot reflects the removed legacy proof exports and the added envelope/component exports
 
@@ -77,6 +76,7 @@ Deferred. Tracked but not in the current roadmap.
 
 ### Quality
 
+- **QA-03** (dropped from v2.0 on 2026-09-28): A Rust-signed MDK Current-profile KeyPackage carrying a `0x8009` proof verifies in marmot-ts as a pinned fixture
 - **QA-F1**: Per-seam parity test matrix — each malformed input (missing, duplicate, `0xf2f1`, wrong ciphersuite, identity change) run through every seam asserting identical rejection
 - **QA-F2**: QA-02-style byte-exact parity dossier for the `0x8009` component bound to one tested source SHA
 
@@ -128,16 +128,15 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-03 | Phase 10 | Complete |
 | FOUND-04 | Phase 10 | Complete |
 | FOUND-05 | Phase 10 | Complete |
-| QA-03 | Phase 11 | Pending |
 | QA-04 | Phase 11 | Pending |
 | QA-05 | Phase 11 | Pending |
 
 **Coverage:**
 
-- v2.0 requirements: 28 total
-- Mapped to phases: 28
+- v2.0 requirements: 27 total (QA-03 dropped 2026-09-28)
+- Mapped to phases: 27
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-09-12*
-*Last updated: 2026-09-12 after roadmap creation (Phases 6-11)*
+*Last updated: 2026-09-28 — QA-03 (Rust-signed fixture) dropped from v2.0*
