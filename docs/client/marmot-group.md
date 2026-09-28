@@ -144,6 +144,8 @@ group.welcomeDeliveries; // every attempted delivery, in order: { kind: "succeed
 group.pendingWelcomes; // the failed subset still needing delivery
 ```
 
+A delivery counts as `succeeded` only when **at least one relay acknowledged** the gift-wrapped Welcome (`ok: true`). A publish that every relay rejected — auth-required, rate-limited, blocked, or otherwise — is reported as `failed`, appears in `pendingWelcomes`, and is re-published by `retryWelcome`, even though the underlying publish call itself did not throw. The same rule applies to the per-recipient Welcome outcomes of an ordinary invite (`GroupRuntime`'s `welcomeDelivery.outcomes`).
+
 Check `pendingWelcomes` after a founding create and retry each entry:
 
 ```typescript

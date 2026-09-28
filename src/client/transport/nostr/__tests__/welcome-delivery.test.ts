@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 
 import { testAccount } from "../../../../__tests__/helpers/test-accounts.js";
 import { MockNetwork } from "../../../../__tests__/helpers/mock-network.js";
-import type { NostrNetworkInterface } from "../../../nostr-interface.js";
+import type {
+  NostrNetworkInterface,
+  PublishResponse,
+} from "../../../nostr-interface.js";
 import {
   NostrWelcomeDelivery,
   type WelcomeRecipient,
@@ -32,13 +35,23 @@ function makeRecipient(
   };
 }
 
-/** Wraps a MockNetwork so `getUserInboxRelays` can be overridden per-pubkey. */
+/**
+ * Wraps a MockNetwork so `getUserInboxRelays` can be overridden per-pubkey,
+ * and (CR-02) so `publish` can be overridden to return a canned per-relay
+ * response for a specific recipient's gift wrap, while other calls delegate
+ * to `mockNetwork.publish` unchanged.
+ */
 function makeNetwork(
   mockNetwork: MockNetwork,
   getUserInboxRelays: (pubkey: string) => Promise<string[]>,
+  publish: (
+    relays: string[],
+    event: NostrEvent,
+  ) => Promise<Record<string, PublishResponse>> = (relays, event) =>
+    mockNetwork.publish(relays, event),
 ): NostrNetworkInterface {
   return {
-    publish: (relays, event) => mockNetwork.publish(relays, event),
+    publish,
     request: async () => {
       throw new Error("not used");
     },
@@ -182,6 +195,134 @@ describe("NostrWelcomeDelivery.deliverMany", () => {
     expect(
       giftWraps.filter((event) => recipientOf(event) === second.pubkey),
     ).toHaveLength(1);
+  });
+
+  it("CR-02: classifies a fulfilled publish where every relay returned ok:false as failed, naming each relay's rejection", async () => {
+    const admin = testAccount(0);
+    const adminPubkey = await admin.signer.getPublicKey();
+    const mockNetwork = new MockNetwork();
+
+    const first = makeRecipient(testAccount(1).pubkey, "a".repeat(64));
+    const second = makeRecipient(testAccount(2).pubkey, "b".repeat(64));
+
+    const network = makeNetwork(
+      mockNetwork,
+      async () => ["wss://relayA.test", "wss://relayB.test"],
+      async (relays, event) => {
+        const recipientOfEvent = event.tags.find((tag) => tag[0] === "p")?.[1];
+        if (event.kind === 1059 && recipientOfEvent === second.pubkey) {
+          const messages = ["rate-limited", "auth-required"];
+          const result: Record<string, PublishResponse> = {};
+          relays.forEach((relay, index) => {
+            result[relay] = {
+              from: relay,
+              ok: false,
+              message: messages[index],
+            };
+          });
+          return result;
+        }
+        return mockNetwork.publish(relays, event);
+      },
+    );
+
+    const delivery = new NostrWelcomeDelivery({
+      signer: admin.signer,
+      network,
+    });
+
+    const outcomes = await delivery.deliverMany({
+      welcome: WELCOME,
+      author: adminPubkey,
+      groupRelays: GROUP_RELAYS,
+      recipients: [first, second],
+    });
+
+    expect(outcomes).toHaveLength(2);
+    expect(outcomes[0]).toMatchObject({ kind: "succeeded", recipient: first });
+    expect(outcomes[1]).toMatchObject({
+      kind: "failed",
+      recipient: second,
+      error: expect.stringMatching(/^No relay accepted the Welcome/),
+    });
+    if (outcomes[1]!.kind !== "failed")
+      throw new Error("expected second outcome to fail");
+    expect(outcomes[1]!.error).toContain("wss://relayA.test");
+    expect(outcomes[1]!.error).toContain("wss://relayB.test");
+    expect(outcomes[1]!.error).toContain("rate-limited");
+    expect(outcomes[1]!.error).toContain("auth-required");
+  });
+
+  it("CR-02: classifies a fulfilled publish with at least one ok:true relay as succeeded, carrying the full response", async () => {
+    const admin = testAccount(0);
+    const adminPubkey = await admin.signer.getPublicKey();
+    const mockNetwork = new MockNetwork();
+    const recipient = makeRecipient(testAccount(1).pubkey, "a".repeat(64));
+
+    const mixedResponse: Record<string, PublishResponse> = {
+      "wss://relayA.test": { from: "wss://relayA.test", ok: true },
+      "wss://relayB.test": {
+        from: "wss://relayB.test",
+        ok: false,
+        message: "rate-limited",
+      },
+    };
+
+    const network = makeNetwork(
+      mockNetwork,
+      async () => ["wss://relayA.test", "wss://relayB.test"],
+      async () => mixedResponse,
+    );
+
+    const delivery = new NostrWelcomeDelivery({
+      signer: admin.signer,
+      network,
+    });
+
+    const outcomes = await delivery.deliverMany({
+      welcome: WELCOME,
+      author: adminPubkey,
+      groupRelays: GROUP_RELAYS,
+      recipients: [recipient],
+    });
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ kind: "succeeded", recipient });
+    if (outcomes[0]!.kind !== "succeeded")
+      throw new Error("expected outcome to succeed");
+    expect(outcomes[0]!.response).toEqual(mixedResponse);
+  });
+
+  it("CR-02: classifies an empty publish response as failed", async () => {
+    const admin = testAccount(0);
+    const adminPubkey = await admin.signer.getPublicKey();
+    const mockNetwork = new MockNetwork();
+    const recipient = makeRecipient(testAccount(1).pubkey, "a".repeat(64));
+
+    const network = makeNetwork(
+      mockNetwork,
+      async () => ["wss://relayA.test"],
+      async () => ({}),
+    );
+
+    const delivery = new NostrWelcomeDelivery({
+      signer: admin.signer,
+      network,
+    });
+
+    const outcomes = await delivery.deliverMany({
+      welcome: WELCOME,
+      author: adminPubkey,
+      groupRelays: GROUP_RELAYS,
+      recipients: [recipient],
+    });
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({
+      kind: "failed",
+      recipient,
+      error: "No relay accepted the Welcome",
+    });
   });
 });
 
