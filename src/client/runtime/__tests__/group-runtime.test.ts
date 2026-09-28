@@ -10,11 +10,12 @@ import type {
   PublishResponse,
 } from "../../nostr-interface.js";
 import type { GroupPublishWork } from "../../session/group-effects.js";
-import type {
+import {
   NostrWelcomeDelivery,
-  WelcomeRecipient,
+  type WelcomeRecipient,
 } from "../../transport/nostr/welcome-delivery.js";
 import { GroupRuntime, type GroupRuntimeOptions } from "../group-runtime.js";
+import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
 import publishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/publish-fail.v1.json";
 import invitePublishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json";
 
@@ -52,47 +53,25 @@ function makeNetwork(
 }
 
 /**
- * Builds a `deliverMany` implementation that reproduces
- * `NostrWelcomeDelivery.deliverMany`'s real per-recipient semantics
- * (D-06/D-07) by delegating to the fixture's `deliver` mock: settle all
- * recipients, map each fulfillment to a succeeded outcome carrying its
- * recipient and value, and each rejection to a failed outcome carrying its
- * recipient and the reason's message. The real `deliverMany` implementation
- * is covered separately by Task 1's unit tests
- * (`src/client/transport/nostr/__tests__/welcome-delivery.test.ts`).
+ * Builds a `deliverMany` implementation that runs the production method
+ * (see the call below) against the fixture's `deliver` mock, so this
+ * suite's Welcome-delivery assertions cannot drift from the real
+ * per-recipient classification (CR-02). `deliverMany`'s only `this`
+ * dependency is `deliver` (it calls `this.deliver` per recipient), so a
+ * bare `{ deliver }` object stands in for a full `NostrWelcomeDelivery`
+ * instance here.
  */
 function makeDeliverManyFromDeliver(deliver: NostrWelcomeDelivery["deliver"]) {
-  return async (options: {
+  return (options: {
     welcome: Welcome;
     author: string;
     groupRelays: string[];
     recipients: WelcomeRecipient[];
-  }) => {
-    const settled = await Promise.allSettled(
-      options.recipients.map((recipient) =>
-        deliver({
-          welcome: options.welcome,
-          author: options.author,
-          groupRelays: options.groupRelays,
-          recipient,
-        }),
-      ),
+  }) =>
+    NostrWelcomeDelivery.prototype.deliverMany.call(
+      { deliver } as unknown as NostrWelcomeDelivery,
+      options,
     );
-    return settled.map((result, index) => {
-      const recipient = options.recipients[index]!;
-      if (result.status === "fulfilled")
-        return {
-          kind: "succeeded" as const,
-          recipient,
-          response: result.value,
-        };
-      const error =
-        result.reason instanceof Error
-          ? result.reason.message
-          : String(result.reason);
-      return { kind: "failed" as const, recipient, error };
-    });
-  };
 }
 
 function makeRuntime(overrides: Partial<GroupRuntimeOptions> = {}) {
@@ -495,5 +474,62 @@ describe("GroupRuntime Welcome delivery", () => {
     expect(confirmPublished).toHaveBeenCalledOnce();
     expect(publishFailed).not.toHaveBeenCalled();
     expect(deliver).toHaveBeenCalledTimes(2);
+  });
+
+  it("CR-02: an ordinary invite whose Welcome no relay acknowledged reports a failed outcome (real NostrWelcomeDelivery)", async () => {
+    const welcomePublish = vi.fn(async () => noAckResponse());
+    const welcomeNetwork: NostrNetworkInterface = {
+      ...makeNetwork(welcomePublish),
+      getUserInboxRelays: async () => ["wss://inbox.test"],
+    };
+    const welcomeDelivery = new NostrWelcomeDelivery({
+      signer: testAccount(0).signer,
+      network: welcomeNetwork,
+    });
+
+    const cr02Recipient: WelcomeRecipient = {
+      pubkey: testAccount(1).pubkey,
+      keyPackageEventId: "a".repeat(64),
+      keyPackageEvent: {} as NostrEvent,
+    };
+    // A minimal, real `Welcome` object shaped like the one in
+    // welcome-delivery.test.ts; NostrWelcomeDelivery only encodes it into a
+    // rumor's content — it does not need to be cryptographically joinable.
+    const cr02Welcome = {
+      welcome: {
+        cipherSuite: 1,
+        secrets: [],
+        encryptedGroupInfo: new Uint8Array([1, 2, 3, 4]),
+      } as Welcome,
+    };
+
+    const { runtime, confirmPublished, publishFailed } = makeRuntime({
+      welcomeDelivery,
+    });
+
+    const [result] = await runtime.publishEffects({
+      publish: [
+        commitWork({
+          welcome: cr02Welcome,
+          welcomeRecipients: [cr02Recipient],
+        }),
+      ],
+    });
+
+    expect(result.welcomeDelivery).toEqual({
+      kind: "attempted",
+      outcomes: [
+        {
+          kind: "failed",
+          recipient: cr02Recipient,
+          error: expect.stringMatching(/^No relay accepted the Welcome/),
+        },
+      ],
+    });
+    expect(result.persistence).toEqual({ kind: "succeeded" });
+    expect(confirmPublished).toHaveBeenCalledOnce();
+    expect(publishFailed).not.toHaveBeenCalled();
+    expect(welcomePublish).toHaveBeenCalledOnce();
+    expect(welcomePublish.mock.calls[0]![1]).toMatchObject({ kind: 1059 });
   });
 });

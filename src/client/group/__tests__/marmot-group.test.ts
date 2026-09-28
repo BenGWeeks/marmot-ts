@@ -45,7 +45,10 @@ import {
 import { encodeGroupProfileV1 } from "../../../core/components/group-profile.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
 import { InMemoryKeyValueStore } from "../../../extra";
-import type { NostrNetworkInterface } from "../../nostr-interface.js";
+import type {
+  NostrNetworkInterface,
+  PublishResponse,
+} from "../../nostr-interface.js";
 import { MockNetwork } from "../../../__tests__/helpers/mock-network.js";
 import {
   createAdminCommitPolicyCallback,
@@ -1155,5 +1158,65 @@ describe("MarmotGroup founding Welcome delivery report (D-04/D-10/D-12/R-04, FOU
 
     expect(outcomes.every((o) => o.kind === "failed")).toBe(true);
     expect(group.pendingWelcomes).toHaveLength(2);
+  });
+
+  it("CR-02: an unacknowledged Welcome publish is reported in pendingWelcomes and retryWelcome re-attempts it until a relay acknowledges", async () => {
+    const mockNetwork = new MockNetwork(["wss://relay.test"]);
+    const { group, adminAccount } = await makeGroup(mockNetwork);
+    const first = makeRecipient(testAccount(13).pubkey, "3".repeat(64));
+    const second = makeRecipient(testAccount(14).pubkey, "4".repeat(64));
+
+    const originalPublish = mockNetwork.publish.bind(mockNetwork);
+    const publishSpy = vi
+      .spyOn(mockNetwork, "publish")
+      .mockImplementation(async (relays, event) => {
+        const recipientOfEvent = event.tags.find((tag) => tag[0] === "p")?.[1];
+        if (event.kind === 1059 && recipientOfEvent === second.pubkey) {
+          const result: Record<string, PublishResponse> = {};
+          for (const relay of relays)
+            result[relay] = { from: relay, ok: false, message: "blocked" };
+          return result;
+        }
+        return originalPublish(relays, event);
+      });
+
+    const secondGiftWrapCalls = () =>
+      publishSpy.mock.calls.filter(
+        ([, event]) =>
+          event.kind === 1059 &&
+          event.tags.find((tag) => tag[0] === "p")?.[1] === second.pubkey,
+      ).length;
+
+    const outcomes = await group.deliverFoundingWelcomes({
+      welcome: WELCOME,
+      author: adminAccount.pubkey,
+      recipients: [first, second],
+    });
+
+    expect(outcomes).toHaveLength(2);
+    expect(group.pendingWelcomes).toHaveLength(1);
+    expect(group.pendingWelcomes[0]!.recipient).toEqual(second);
+    expect(group.pendingWelcomes[0]!.kind).toBe("failed");
+    if (group.pendingWelcomes[0]!.kind !== "failed")
+      throw new Error("expected pending entry to be failed");
+    expect(group.pendingWelcomes[0]!.error).toMatch(
+      /No relay accepted the Welcome/,
+    );
+    const firstOutcome = outcomes.find(
+      (outcome) => outcome.recipient === first,
+    );
+    expect(firstOutcome?.kind).toBe("succeeded");
+
+    const callsBeforeRetry = secondGiftWrapCalls();
+    const retried = await group.retryWelcome(second.pubkey);
+    expect(retried.kind).toBe("failed");
+    expect(group.pendingWelcomes).toHaveLength(1);
+    expect(secondGiftWrapCalls()).toBe(callsBeforeRetry + 1);
+
+    publishSpy.mockRestore();
+    const retriedAgain = await group.retryWelcome(second.pubkey);
+    expect(retriedAgain.kind).toBe("succeeded");
+    expect(group.pendingWelcomes).toEqual([]);
+    expect(group.welcomeDeliveries).toHaveLength(2);
   });
 });
