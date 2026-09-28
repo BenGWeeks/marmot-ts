@@ -163,6 +163,13 @@ None - no external service configuration required.
 - `git diff --stat src/client/ src/core/` is empty for this plan's commits — confirmed engine-only change, no ripple into client or core layers.
 - This closes one of three gap-closure plans (10-05 CR-01, 10-06 CR-02, 10-07 CR-03) spawned from `10-REVIEW.md`; REQUIREMENTS.md/STATE.md/ROADMAP.md updates for the wave as a whole are the orchestrator's responsibility after all three land.
 
+## Self-Check: PASSED
+
+- FOUND: `.planning/phases/10-founding-group-creation-via-welcome/10-07-SUMMARY.md`
+- FOUND: commit `de11d95` (Task 1)
+- FOUND: commit `e772051` (Task 2)
+- FOUND: commit `e273874` (SUMMARY.md)
+
 ---
 *Phase: 10-founding-group-creation-via-welcome*
 *Completed: 2026-09-28*
