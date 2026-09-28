@@ -2,6 +2,7 @@
 phase: 10-founding-group-creation-via-welcome
 reviewed: 2026-09-28T00:00:00Z
 depth: standard
+review_kind: re-review (post gap-closure 10-05/10-06/10-07; prior review at commit fd3df86)
 files_reviewed: 17
 files_reviewed_list:
   - docs/client/marmot-client.md
@@ -22,14 +23,14 @@ files_reviewed_list:
   - src/engine/group-engine.ts
   - src/engine/types.ts
 findings:
-  critical: 3
-  warning: 5
-  info: 5
-  total: 13
+  critical: 0
+  warning: 6
+  info: 8
+  total: 14
 status: issues_found
 ---
 
-# Phase 10: Code Review Report
+# Phase 10: Code Review Report (Re-review after gap closure)
 
 **Reviewed:** 2026-09-28T00:00:00Z
 **Depth:** standard
@@ -38,208 +39,175 @@ status: issues_found
 
 ## Summary
 
-Reviewed the phase-10 diff (`d339d7d..HEAD`) for founding group creation via Welcome: the engine `foundingAdd` send case, `GroupFactory.create({ invitees })`, the shared `NostrWelcomeDelivery.deliverMany` fanout, the `MarmotGroup` per-invitee delivery report and retry API, the `GroupRuntime` Welcome-outcome reshaping, and the two docs pages. `tsc -p tsconfig.json --noEmit` is clean.
+This re-review covers the phase-10 diff after gap-closure plans 10-05 (CR-01), 10-06 (CR-02) and 10-07 (CR-03) landed (`fd3df86..HEAD`). The prior report is preserved in git at `fd3df86`. `tsc -p tsconfig.json --noEmit` is clean. The six phase test files (72 tests) pass.
 
-The happy path works and is well covered by tests. Three problems need fixing before this ships:
+All three prior Critical findings are **RESOLVED**:
 
-1. **Founding create without relays.** `create({ invitees })` with no `relays` still adds every invitee at epoch 1, persists the group, and then fails every Welcome, because `createWelcomeRumor()` requires a non-empty relays tag. The group cannot recover. It has no routing component, so it can never publish a commit that would add relays. The in-source JSDoc still describes the disproved "NIP-65 inbox fallback" behaviour. The docs page describes the failure correctly, but it also points to a recovery path that does not exist.
-2. **Unacknowledged Welcomes reported as delivered.** `deliverMany` classifies a Welcome that no relay acknowledged as `succeeded`. `pendingWelcomes` then hides it, and `retryWelcome` refuses to retry it.
-3. **Unguarded `foundingAdd` engine intent.** The engine accepts a `foundingAdd` intent at any epoch. This is a public `./engine` API. Calling it on a live group merges a commit locally that is never published, which silently forks the caller from every peer. That violates the spec's "limited to the epoch-0 creation" rule.
+- **CR-01:** `assertFoundingInviteeRelays` fails closed before any key material, MLS state or store write exists. Test 13 was rewritten to prove the refusal and that nothing was persisted or published. The stale NIP-65 JSDoc and docs claims were corrected.
+- **CR-02:** `deliverMany` now classifies an unacknowledged publish as `failed`, using the same `hasAck` rule that group events use. It is covered at the unit, `MarmotGroup.retryWelcome` and `GroupRuntime` levels. The runtime test now drives the production `deliverMany` instead of a hand-copied re-implementation.
+- **CR-03:** The engine `foundingAdd` case now enforces epoch 0, a sole local leaf, no unapplied proposals, and a non-empty Add-only set, and each refusal has a test.
 
-## Critical Issues
+None of the prior Warnings or Info items was in gap-closure scope, and all are still **OPEN**. The gap closure introduced one new Warning: the CR-03 guard is checked against a state snapshot that the commit is not bound to (TOCTOU across the ProposalAction awaits). There are also three new Info items: a guard-vs-codec drift in relay validation, a narrowed never-throw guarantee in `deliverMany`, and stale D-09/R-05 test comments.
 
-### CR-01: Relay-less founding create is accepted, adds members who can never be welcomed, and yields a permanently dead group; JSDoc describes behaviour that is false
+No new Critical issues were found.
 
-**File:** `src/client/group-factory.ts:86-93, 176-255`; `src/client/group/marmot-group.ts:736-742`; `docs/client/marmot-client.md:86`
-**Issue:**
-`GroupFactory.create()` goes into `#createFounding` whenever `invitees.length > 0`, whatever `options.relays` contains. With no relays:
+## Prior Finding Status
 
-- `createSimpleGroup` adds no `transport.nostr.routing` component (`src/core/group.ts:146-151`).
-- The founding Add is merged and persisted at epoch 1 with every invitee in the tree (`save(true)`).
-- Every `deliver()` call rejects inside `createWelcomeRumor()` (`src/core/welcome-event.ts:57-60`, "Welcome rumor requires a non-empty relays tag"). This happens before any inbox-relay lookup, so all N Welcomes fail. Test 13 in `founding-create.test.ts` confirms this and pins it as expected behaviour.
+| ID    | Title (abridged)                                                               | Status       | Evidence                                                                                                                                                                                                                                                                                                                        |
+| ----- | ------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CR-01 | Relay-less founding create yields a dead group; JSDoc false                    | **RESOLVED** | `group-factory.ts:186` calls `assertFoundingInviteeRelays` (`:399-415`) before `#getCiphersuiteImpl`/`generateKeyPackage`; JSDoc `:87-93`, `marmot-group.ts:736-744, 770-776`, `marmot-client.md:86` corrected; Test 13 asserts no `signEvent`, no store keys, no `created`, no gift wraps. Caveat: see new IN-06.                  |
+| CR-02 | `deliverMany` reports unacknowledged Welcome as `succeeded`                    | **RESOLVED** | `welcome-delivery.ts:154-165` gates `succeeded` on `hasAck`; all-`ok:false` and empty `{}` responses map to `failed`; covered by `welcome-delivery.test.ts` (3 new cases), `marmot-group.test.ts` CR-02 retry test, `group-runtime.test.ts` CR-02 runtime test; docs `marmot-group.md:147`. Caveat: see new IN-07.             |
+| CR-03 | Engine `foundingAdd` has no epoch-0 / sole-member / Add-only guard             | **RESOLVED** | `group-engine.ts:1227-1248` (epoch, sole local leaf, no unapplied proposals) and `:1274-1287` (non-empty, Add-only on resolved proposals); `types.ts:144-151` documents the preconditions; five new refusal tests in `founding-add-send.test.ts`. Caveat: see new WR-06.                                                        |
+| WR-01 | `case "foundingAdd"` duplicates ~100 lines of `case "commit"`                  | **OPEN**     | Unchanged; the duplicated block has grown by the CR-03 guard (`group-engine.ts:1189-1365` vs `1079-1187`).                                                                                                                                                                                                                     |
+| WR-02 | `deliverFoundingWelcomes` public mutator; `retryWelcome` not reentrancy-safe   | **OPEN**     | `marmot-group.ts:745-800` unchanged: still public, still overwrites retained Welcome/report, `retryWelcome` still writes back through a stale `index` after the await.                                                                                                                                                          |
+| WR-03 | Breaking public-type changes shipped with no changeset                         | **OPEN**     | `.changeset/` still has no phase-10 entry. The gap closure adds another behaviour change to document: `create({ invitees })` now **throws** without valid relays (CR-01), and ordinary-invite Welcome outcomes can now be `failed` for unacked publishes (CR-02).                                                               |
+| WR-04 | "Re-invite with fresh KeyPackage" recovery omits the double-leaf consequence   | **OPEN**     | `marmot-group.md:161`, `marmot-client.md:87`, `marmot-group.ts:696-707` unchanged.                                                                                                                                                                                                                                              |
+| WR-05 | `create()` blocks on Welcome fanout after persist, before track/emit           | **OPEN**     | `group-factory.ts:247-260` still awaits `deliverFoundingWelcomes` after `save(true)`; `groups-manager.ts:812-815` still tracks/emits only afterwards.                                                                                                                                                                           |
+| IN-01 | Creator's own KeyPackage not rejected as a founding invitee                    | **OPEN**     | `group-factory.ts:283` still seeds `seenPubkeys` empty.                                                                                                                                                                                                                                                                         |
+| IN-02 | Ephemeral founding engine audits a confirmed epoch for a never-persisted group | **OPEN**     | `group-factory.ts:354` `confirmPublished` still precedes `assertOneWelcomeSecretPerInvitee` at `:361`.                                                                                                                                                                                                                          |
+| IN-03 | `GroupsManager.invite()` discards per-invitee Welcome outcome                  | **OPEN**     | `groups-manager.ts:366-380` still returns only `result.response`. This matters more now that CR-02 makes `failed` reachable for unacked invites.                                                                                                                                                                             |
+| IN-04 | "Only one durable write" claim inaccurate with stores configured               | **OPEN**     | `group-factory.ts:175-176` unchanged.                                                                                                                                                                                                                                                                                           |
+| IN-05 | Supplied `historyTree` not bound by `GroupSession`; factory patches it         | **OPEN**     | `group-factory.ts:242-246` workaround and `group-session.ts:295-296` unchanged.                                                                                                                                                                                                                                                 |
 
-`create()` still resolves successfully. The docs' claimed recovery ("re-inviting every member once the group has relays") is impossible. Adding relays requires a GroupContextExtensions commit, and `GroupRuntime.#publishToGroupRelays` throws "Group has no relays available to send messages." (`group-runtime.ts:328-330`). The engine's wrap also refuses to build any group event without the routing component. The result is a persisted group that can never be used, holding N phantom members.
-
-Two in-source doc comments also contradict the verified behaviour:
-
-- `group-factory.ts:86-91`: "Welcome delivery in that case depends entirely on each recipient's own published NIP-65 inbox relays"
-- `marmot-group.ts:738-742`: "Passing an empty group-relay list is expected and supported (D-09) — delivery then depends entirely on each recipient's NIP-65 inbox relays"
-
-Both are false. The failure is deterministic, so there is nothing to gain by accepting this input. Rejecting it up front costs nothing, and today it is a footgun documented as "supported".
-
-**Fix:** Fail closed before any MLS state is created. Use the same relay rules the Welcome rumor enforces, so a malformed list (empty strings or duplicates) cannot cause the same all-Welcomes-fail outcome:
-
-```ts
-// GroupFactory.create(), before createSimpleGroup
-const invitees = options?.invitees;
-if (invitees && invitees.length > 0) {
-  const relays = options?.relays ?? [];
-  if (
-    relays.length === 0 ||
-    relays.some((r) => r.length === 0) ||
-    new Set(relays).size !== relays.length
-  ) {
-    throw new Error(
-      "GroupFactory.create: founding invitees require a non-empty list of distinct group relays " +
-        "(every Welcome rumor must carry a relays tag, and a relay-less group can never publish)",
-    );
-  }
-}
-```
-
-Then:
-
-- Rewrite Test 13 to expect the rejection, and to check that no state was persisted and no gift wrap was published.
-- Delete the stale NIP-65 sentences at `group-factory.ts:86-91` and `marmot-group.ts:738-742`.
-- Replace the `marmot-client.md:86` bullet with "`create()` throws when `invitees` is supplied without `relays`", and drop the non-existent recovery path.
-
-If D-09 must stay "supported", at minimum correct both JSDoc blocks and the docs recovery claim, and flag the choice as a recorded divergence. Even then the group remains unrecoverable.
-
-### CR-02: `deliverMany` reports a Welcome that no relay accepted as `succeeded`, so `pendingWelcomes` and `retryWelcome` silently lose the invitee
-
-**File:** `src/client/transport/nostr/welcome-delivery.ts:109, 140-149`; consumed by `src/client/group/marmot-group.ts:722-726, 788-789`
-**Issue:**
-`deliver()` returns `this.network.publish(inboxRelays, giftWrapEvent)`, which resolves with a per-relay `Record<string, PublishResponse>` where each entry carries `ok: boolean`. `deliverMany` maps every fulfilled promise to `{ kind: "succeeded" }`, including one where every relay returned `ok: false` (auth-required, rate-limited, blocked, and so on). The group-event path treats that case as failure (`group-runtime.ts:350`, `if (!hasAck(response))`). The Welcome path does not.
-
-This defeats FOUND-04, the whole point of the per-invitee report:
-
-- `pendingWelcomes` omits the invitee.
-- `retryWelcome(pubkey)` returns the stale `succeeded` outcome "without re-publishing" (`marmot-group.ts:789`).
-
-The invitee is a member at epoch 1 who was never told, and nothing records it. The same misclassification now also flows into `GroupRuntime`'s `welcomeDelivery.outcomes`. No test covers an `ok: false` Welcome publish.
-
-**Fix:**
-
-```ts
-import { hasAck } from "../../../utils/index.js";
-
-return settled.map((result, index) => {
-  const recipient = options.recipients[index]!;
-  if (result.status === "fulfilled") {
-    if (hasAck(result.value))
-      return { kind: "succeeded", recipient, response: result.value };
-    const detail = Object.values(result.value)
-      .filter((r) => !r.ok)
-      .map((r) => `${r.from}: ${r.message ?? "rejected"}`)
-      .join("; ");
-    return {
-      kind: "failed",
-      recipient,
-      error: `No relay accepted the Welcome${detail ? ` (${detail})` : ""}`,
-    };
-  }
-  ...
-});
-```
-
-Also add a `deliverMany` test where `publish` resolves with all `ok: false`, and a `retryWelcome` test that such an entry is retried.
-
-### CR-03: Engine `foundingAdd` intent has no epoch-0 / sole-member / Add-only guard; on a live group it merges an unpublished commit locally (silent fork)
-
-**File:** `src/engine/group-engine.ts:1189-1305`; `src/engine/types.ts:135-152`
-**Issue:**
-`SendIntent` is part of the public `./engine` surface, so any caller of `MarmotGroupEngine.send()` can submit `{ kind: "foundingAdd" }`. The case checks only `groupData` presence and `mayPrepareLocalCommit`. It does not check any of the following:
-
-- `parentState.groupContext.epoch === 0n`
-- that the creator is the sole leaf
-- that `extraProposals` is non-empty and contains only Add proposals
-- that there are no `unappliedProposals`, which `createCommit` would bundle by reference at epoch N
-
-The caller is also told to `confirmPublished()` immediately, with no publish. Invoked on a group at epoch N with peers, the engine advances locally to N+1 through a commit that no peer ever sees: a guaranteed, silent fork. That directly violates `refs/marmot/protocol-core/publish-lifecycle.md`: "The empty-obligation exception is limited to the epoch-0 creation and, when applicable, its immediately following founding Add Commit. Every subsequent Commit follows the normal publish-before-apply rule." The only thing that keeps this safe today is the single in-tree caller (`GroupFactory.#createFounding`), and the types doc admits the related D-01 invariant is "convention, not enforced".
-
-**Fix:** Enforce the spec boundary inside the case, before any proposal resolution:
-
-```ts
-case "foundingAdd": {
-  if (this.state.groupContext.epoch !== 0n)
-    throw new Error("foundingAdd is only legal at epoch 0 (founding-creation exception)");
-  if (getGroupMembers(this.state).length !== 1)   // or a leaf-count check on the ratchet tree
-    throw new Error("foundingAdd requires a one-member group");
-  if (Object.keys(this.state.unappliedProposals).length > 0)
-    throw new Error("foundingAdd requires no staged proposals");
-  if (intent.extraProposals.flat().length === 0)
-    throw new Error("foundingAdd requires at least one Add proposal");
-  ...
-  // after resolving proposals:
-  if (newProposals.some((p) => p.proposalType !== defaultProposalTypes.add))
-    throw new Error("foundingAdd may only carry Add proposals");
-```
-
-Add engine tests that `foundingAdd` is refused at epoch >= 1 and when a non-Add proposal is supplied.
+The full text and fixes for the OPEN items are unchanged from the prior report at `fd3df86` and are restated below so that this file stands alone.
 
 ## Warnings
 
-### WR-01: `case "foundingAdd"` duplicates about 100 lines of `case "commit"`, so legality changes can drift
+### WR-01: `case "foundingAdd"` duplicates about 100 lines of `case "commit"`, so legality changes can drift (OPEN, carried)
 
-**File:** `src/engine/group-engine.ts:1189-1305` (vs `1075-1187`)
-**Issue:** Proposal resolution, `#prepareOutboundCommitProposals`, the commit options, `createCommit`, `#assertStagedCommitLegal`, the lifecycle transition, `#stagedCommitParentEpoch`, `#sentContentIds` and `ownCommitStamp` are all copied almost verbatim. The comments claim that because the gate is "identical", it "cannot drift from ordinary commit legality". That is only true until someone edits one copy. For example, the `proposalRefs` WR-05 validation or a future pre-commit check added to `case "commit"` will not reach `foundingAdd`.
-**Fix:** Extract a private `#stageCommit(newProposals, { wrap: boolean })` helper that returns `{ commit, newState, welcome, parentState, prepared }`. Both cases call it, and only `commit` calls `peeler.wrapGroupMessage`.
+**File:** `src/engine/group-engine.ts:1189-1365` (vs `1079-1187`)
+**Issue:** Proposal resolution, `#prepareOutboundCommitProposals`, the commit options, `createCommit`, `#assertStagedCommitLegal`, the lifecycle transition, the `#stagedCommitParentEpoch` pin, `#sentContentIds` and `ownCommitStamp` are copied almost verbatim. The in-code claim that the shared gate "cannot drift from ordinary commit legality" holds only until one copy is edited. For example, the `proposalRefs` WR-05 validation in `case "commit"` has no counterpart here, and a future pre-commit check added there will not reach `foundingAdd`. CR-03 made the case longer without factoring anything out.
+**Fix:** Extract `#stageCommit(parentState, newProposals)`, which returns `{ commit, newState, welcome, prepared }` and performs prepare → `createCommit` → `#assertStagedCommitLegal`. Both cases call it; only `commit` then calls `peeler.wrapGroupMessage`. The CR-03 guard stays in `foundingAdd` as a precondition block before the call.
 
-### WR-02: `deliverFoundingWelcomes` is a public mutator, and `retryWelcome` is not reentrancy-safe
+### WR-02: `deliverFoundingWelcomes` is a public mutator, and `retryWelcome` is not reentrancy-safe (OPEN, carried)
 
-**File:** `src/client/group/marmot-group.ts:743-798`
+**File:** `src/client/group/marmot-group.ts:745-800`
 **Issue:**
-- `deliverFoundingWelcomes` is public on `MarmotGroup`. Any caller, on any group (including a non-founding or loaded one), can overwrite `#foundingWelcome`, `#foundingWelcomeAuthor` and `#welcomeDeliveries` with an arbitrary Welcome, and so replace the real delivery report.
-- `retryWelcome` resolves `index` before the `await` and writes `this.#welcomeDeliveries[index] = outcome!` after it. Two concurrent `retryWelcome(pk)` calls both see `failed`, and both publish a gift-wrapped Welcome. An interleaved `deliverFoundingWelcomes` replaces the array, so the stale `index` then overwrites an unrelated recipient's entry.
+- Any caller, on any group, can call `deliverFoundingWelcomes` and overwrite `#foundingWelcome`, `#foundingWelcomeAuthor` and `#welcomeDeliveries`, which replaces the real founding report.
+- `retryWelcome` resolves `index` before the `await deliverMany(...)` and writes `this.#welcomeDeliveries[index] = outcome!` after it:
+  - Two concurrent `retryWelcome(pk)` calls both observe `failed`, and both publish a new gift wrap.
+  - An interleaved `deliverFoundingWelcomes` swaps the array, so the stale `index` overwrites an unrelated recipient's outcome.
+
+  CR-02 makes this worse: `failed` is now reachable on every unacked publish, so app-level "retry all pending" loops will hit this path more often.
 
 **Fix:**
-- Make the entry point non-public, for example a module-private symbol or a factory-only friend function, or mark it `@internal` and throw if a founding Welcome is already retained.
-- In `retryWelcome`, keep a `Map<pubkey, Promise<WelcomeDeliveryOutcome>>` of in-flight retries and return the existing promise.
-- After the await, re-locate the entry by `recipient.pubkey` instead of reusing `index`.
+- Make the entry point internal (a module-private symbol or a factory-only function), or throw if a founding Welcome is already retained.
+- Keep an in-flight `Map<pubkey, Promise<WelcomeDeliveryOutcome>>` and return the existing promise to a second caller.
+- After the await, re-locate the entry with `findIndex(o => o.recipient.pubkey === pubkey)` on the current array instead of reusing `index`.
 
-### WR-03: Breaking public-type changes shipped with no changeset
+### WR-03: Breaking public-type and behaviour changes shipped with no changeset (OPEN, carried and widened)
 
-**File:** `src/client/session/group-effects.ts:38-59`; `src/engine/types.ts:156-187`
+**File:** `src/client/session/group-effects.ts:38-59`; `src/engine/types.ts:135-195`; `src/client/group-factory.ts:186`; `src/client/transport/nostr/welcome-delivery.ts:154-165`
 **Issue:**
-- `GroupPublishResult.welcomeDelivery` changed from `AncillaryEffectOutcome` (`notRequired | succeeded | failed`) to `WelcomeFanoutOutcome` (`notRequired | attempted`). Downstream code checking `welcomeDelivery.kind === "failed"` now compiles to always-false, or fails to typecheck.
-- `SendResult<TEnvelope>` gained a member without `envelope`, so external `./engine` consumers that read `result.envelope` after `send()`, or switch exhaustively over `result.kind`, break.
+- **Type change:** `GroupPublishResult.welcomeDelivery` changed from `notRequired | succeeded | failed` to `notRequired | attempted`.
+- **Type change:** `SendResult` gained an envelope-less `foundingGroupCreated` member, and `SendIntent` gained `foundingAdd`. Both are public on `./client` and `./engine`.
+- **Behaviour change (gap closure):** `GroupsManager.create()` now throws for `invitees` without valid `relays`.
+- **Behaviour change (gap closure):** Welcome outcomes that were previously `succeeded` for fulfilled-but-unacked publishes are now `failed`.
 
-Both are exported through `./client` and `./engine`, and `.changeset/` has no entry for phase 10.
-**Fix:** Add a changeset (`minor` pre-1.0, or `major`) that documents both shape changes and the migration (`outcomes.some(o => o.kind === "failed")`).
+`.changeset/` still contains no phase-10 entry.
+**Fix:** Add a changeset (`minor` pre-1.0) that covers all four changes and the migration (`welcomeDelivery.kind === "attempted" && outcomes.some(o => o.kind === "failed")`).
 
-### WR-04: The documented "re-invite with a fresh KeyPackage" recovery omits that the invitee already occupies a leaf
+### WR-04: The documented "re-invite with a fresh KeyPackage" recovery omits that the invitee already occupies a leaf (OPEN, carried)
 
 **File:** `docs/client/marmot-group.md:161`; `docs/client/marmot-client.md:87`; `src/client/group/marmot-group.ts:696-707`
-**Issue:** After a founding create, an un-welcomed invitee is already a member at epoch 1: their original KeyPackage leaf is in the tree. A plain `groups.invite(groupId, freshKeyPackage)` adds a *second* leaf for the same identity. That stale leaf can never update, which weakens post-compromise security, and it shows up twice in member views. `evaluateKeyPackageEligibility` (`src/core/key-package-eligibility.ts:118-121`) will also flag the invitee as "already a member", so an app that gates invites on eligibility cannot follow the documented path at all. The spec permits "a new Add commit", but the docs present the recovery as a simple re-invite without these caveats.
-**Fix:** Document the recovery as one commit that removes the stale leaf and adds the fresh KeyPackage (remove + add in `extraProposals`), or provide a `group.reinviteFoundingMember(pubkey, keyPackageEvent)` helper that does it. State the double-leaf consequence of a plain `invite()` explicitly.
+**Issue:** An un-welcomed founding invitee is already a member at epoch 1. A plain `groups.invite(groupId, freshKeyPackage)` adds a second leaf for the same identity:
+- The original leaf can never be updated, which weakens post-compromise security.
+- The invitee shows up twice in member views.
+- `evaluateKeyPackageEligibility` flags them as already a member, so an app that gates invites on eligibility cannot follow the documented path.
 
-### WR-05: `create()` blocks on network Welcome fanout after the group is persisted but before it is tracked or emitted
+**Fix:** Document the recovery as a single commit that removes the stale leaf and adds the fresh KeyPackage (Remove + Add in `extraProposals`), or ship a helper such as `group.reinviteFoundingMember(pubkey, keyPackageEvent)`. Also state explicitly what happens with a plain `invite()`.
 
-**File:** `src/client/group-factory.ts:239-252`; `src/client/groups-manager.ts:812-815`
-**Issue:** `GroupFactory.create()` awaits `deliverFoundingWelcomes` (N inbox-relay lookups plus publishes) after `save(true)`. `GroupsManager.create()` only calls `registry.track()` and emits `created` after that returns. If a relay publish or `getUserInboxRelays` hangs, `create()` never resolves: the group is persisted but untracked, unsubscribed and never announced. That contradicts the stated design that Welcome delivery "does not affect canonical group state" and is "discoverable state, not a return value".
-**Fix:** Return the group (and let the manager track it and emit `created`) before starting the fanout. Expose the fanout as a promise on the group (for example `group.foundingWelcomesSettled`) and fill `welcomeDeliveries` as outcomes settle. Alternatively, bound each delivery with a timeout that maps to a `failed` outcome.
+### WR-05: `create()` blocks on network Welcome fanout after the group is persisted but before it is tracked or emitted (OPEN, carried)
+
+**File:** `src/client/group-factory.ts:247-260`; `src/client/groups-manager.ts:812-815`
+**Issue:** `GroupFactory.create()` awaits `deliverFoundingWelcomes` (N inbox lookups plus publishes) after `save(true)`, and `GroupsManager.create()` only tracks the group and emits `created` after that. If an inbox lookup or publish hangs, `create()` never resolves, and the group is left persisted but untracked, unsubscribed and unannounced. That contradicts "Welcome delivery … does not affect canonical group state".
+**Fix:** Return the group (so the manager can track it and emit `created`) before the fanout. Expose the fanout as `group.foundingWelcomesSettled: Promise<…>` and fill `welcomeDeliveries` as outcomes settle. Alternatively, bound each `deliver` with a timeout that maps to `failed`.
+
+### WR-06 (NEW): The CR-03 legality guard checks one state snapshot, but the commit is built from a later re-read of `this.state` (TOCTOU across the ProposalAction awaits)
+
+**File:** `src/engine/group-engine.ts:1227-1248` (guard on `this.state`), `1257-1263` (awaited ProposalActions), `1289-1313` (`#prepareOutboundCommitProposals(this.state, …)`, `const parentState = this.state`)
+**Issue:** The CR-03 checks (epoch 0, sole local leaf, no unapplied proposals) all read `this.state` before the loop that `await`s each caller-supplied `ProposalAction`. After those awaits, the case re-reads `this.state` to build `prepared.commitState` and `parentState`. The engine has no send/ingest serialization, and it exposes a public `state` setter (`group-engine.ts:592`). So during a ProposalAction await, a concurrent call can move canonical state, and the guard will not see it:
+
+- a concurrent `send({ kind: "selfUpdate" })` followed by `confirmPublished`
+- an `ingest()` batch
+- a direct `engine.state = …` assignment
+
+`foundingAdd` would then build and locally merge an unpublished commit on top of an epoch ≥ 1 state, which is exactly what CR-03 exists to prevent. The in-code comment "Every check below runs before any await" is literally true, but it misleads: the guarded state is not the state that gets committed. `case "commit"` shares the same re-read pattern, but that case publishes its commit. `foundingAdd` is the one case whose safety depends entirely on these preconditions holding at `createCommit` time.
+**Fix:** Bind the guard to the state that is committed:
+
+```ts
+case "foundingAdd": {
+  const guardedState = this.state;
+  // ... CR-03 checks against guardedState ...
+  for (const item of intent.extraProposals.flat()) { /* await resolution */ }
+  if (this.state !== guardedState) {
+    throw new Error("foundingAdd: group state changed while resolving proposals; refusing");
+  }
+  const prepared = this.#prepareOutboundCommitProposals(guardedState, groupData.adminPubkeys, newProposals);
+  const parentState = guardedState;
+  ...
+```
+
+Add a test that passes an async `ProposalAction` which sets `engine.state` to an epoch-1 state before resolving, and asserts the refusal.
 
 ## Info
 
-### IN-01: The creator's own KeyPackage is not rejected as a founding invitee
+### IN-01: The creator's own KeyPackage is not rejected as a founding invitee (OPEN, carried)
 
-**File:** `src/client/group-factory.ts:275-285`
-**Issue:** The D-13 duplicate check seeds `seenPubkeys` empty, so an invitee event authored by the creator's own pubkey passes. It is added as a second leaf for the creator, and a Welcome is gift-wrapped to self. Multi-device is explicitly out of scope for this milestone, so this is almost certainly a caller mistake.
-**Fix:** Seed `seenPubkeys` with `pubkey`, or throw a dedicated "cannot invite yourself" error.
+**File:** `src/client/group-factory.ts:283-293`
+**Issue:** `seenPubkeys` starts empty, so a KeyPackage authored by the creator passes the duplicate check. It becomes a second leaf for the creator, and a Welcome is gift-wrapped to self. Multi-device is out of scope for this milestone.
+**Fix:** Seed the set with the creator: `new Set<string>([pubkey])`. Alternatively, throw a dedicated "cannot invite yourself" error.
 
-### IN-02: The ephemeral founding engine writes audit records for a group that may never exist
+### IN-02: The ephemeral founding engine writes audit records for a group that may never exist (OPEN, carried)
 
-**File:** `src/client/group-factory.ts:320-353`
-**Issue:** The short-lived engine emits `send_entry`, `send_outcome` and `epoch_confirmed` to the shared audit sink. If `assertOneWelcomeSecretPerInvitee` then throws, the audit log records a confirmed epoch 0→1 for a group id that was never persisted.
-**Fix:** Run the D-13 assertion before `confirmPublished` (it only reads `result.welcome`). Otherwise, emit an explicit abort audit record on the throw path.
+**File:** `src/client/group-factory.ts:344-361`
+**Issue:** `confirmPublished` (`:354`, which emits `epoch_confirmed`) runs before `assertOneWelcomeSecretPerInvitee` (`:361`). A D-13 throw therefore leaves an audit record of a confirmed epoch 0→1 for a group id that was never persisted.
+**Fix:** Move the D-13 assertion before `confirmPublished`, since it only reads `result.welcome`. Alternatively, emit an explicit abort audit record on the throw path.
 
-### IN-03: `GroupsManager.invite()` still discards the per-invitee Welcome outcome
+### IN-03: `GroupsManager.invite()` still discards the per-invitee Welcome outcome (OPEN, carried)
 
-**File:** `src/client/groups-manager.ts:366-380`; `src/client/runtime/group-runtime.ts:295-304`
-**Issue:** The new per-recipient `WelcomeFanoutOutcome` is computed for ordinary invites, but `invite()` returns only `result.response`. An ordinary invite whose Welcome fails is therefore invisible to the caller, which is the same silent-loss mode FOUND-04 set out to fix for founding creates.
-**Fix:** Return, or at least log or emit, `result.welcomeDelivery` from `invite()`/`commit()`.
+**File:** `src/client/groups-manager.ts:366-380`; `src/client/runtime/group-runtime.ts:294-304`
+**Issue:** `invite()` returns only `result.response`. After CR-02, an unacked invite Welcome is correctly classified `failed`, but the caller of `invite()` still never sees it.
+**Fix:** Return `result.welcomeDelivery` (or `{ response, welcomeDelivery }`) from `invite()`/`commit()`, or at least emit it.
 
-### IN-04: The "only one durable write" claim is inaccurate when stores are configured
+### IN-04: The "only one durable write" claim is inaccurate when stores are configured (OPEN, carried)
 
-**File:** `src/client/group-factory.ts:173-174`
-**Issue:** The doc says "Only one durable write occurs either way (D-03)". With a `rewindStore`, `save(true)` also flushes several history-tree keys, and lifecycle/ingest-state stores may be written too. Test 4 only counts writes to the client-state store.
-**Fix:** Reword this to "exactly one client-state write, and none at epoch 0".
+**File:** `src/client/group-factory.ts:175-176`
+**Issue:** With a `rewindStore`, `save(true)` also flushes history-tree keys, and lifecycle and ingest-state stores may be written too. Test 4 only counts writes to the client-state store.
+**Fix:** Reword to "exactly one client-state write, and none at epoch 0".
 
-### IN-05: A supplied `historyTree` is not bound to `rewindStore` by `GroupSession`; the binding is patched in the factory
+### IN-05: A supplied `historyTree` is not bound to `rewindStore` by `GroupSession`; the binding is patched in the factory (OPEN, carried)
 
-**File:** `src/client/group-factory.ts:234-238`; `src/client/session/group-session.ts:295-296`
-**Issue:** `GroupSession` only binds a tree it creates itself. Any other caller that constructs `MarmotGroup` with an unbound `historyTree` plus a `rewindStore` gets a throw from `history.flush()` on the first `save()`. The factory works around this with `bindStore` after construction, which is fragile.
-**Fix:** In `GroupSession`'s constructor, bind whenever `rewindStore` is set and the supplied tree is unbound (`bindStore` is already idempotent for the same store). Then remove the factory workaround.
+**File:** `src/client/group-factory.ts:242-246`; `src/client/session/group-session.ts:295-296`
+**Issue:** `GroupSession` only binds a tree it creates itself. Any other caller that supplies an unbound tree together with a `rewindStore` will throw on the first `save()`.
+**Fix:** In `GroupSession`, bind whenever `rewindStore` is set and the supplied tree is unbound (`bindStore` is idempotent for the same store). Then drop the factory workaround.
+
+### IN-06 (NEW): The CR-01 guard validates relays with a weaker rule than the routing codec, so some invalid relays are refused only after the creator KeyPackage is generated; the docs overstate the guarantee
+
+**File:** `src/client/group-factory.ts:399-415`; `src/core/components/nostr-routing.ts:35-52`; `docs/client/marmot-client.md:86`; `src/client/group-factory.ts:87-93`
+**Issue:** `assertFoundingInviteeRelays` checks only `isValidRelayUrl` (parseable ws/wss). The routing codec's `validateRelay` also rejects:
+- URLs over 512 bytes
+- embedded credentials (`wss://u:p@host`)
+- fragments (`wss://host#x`)
+- a missing host
+
+For those inputs the guard passes, `generateKeyPackage` runs (and signs the 0x8009 proof via `signEvent`), and only then does `createSimpleGroup` → `encodeNostrRoutingV1` throw. Nothing is persisted or published, so this is not a safety issue. But the documented claims that the refusal happens "before any key material is generated" and covers "an invalid relay URL" are only true for the subset that `isValidRelayUrl` checks. The two validators can also drift apart. Test 13's `relayShapes` covers none of these codec-only cases.
+**Fix:** Export the routing validator (for example `assertValidNostrRoutingRelay`) and call it from `assertFoundingInviteeRelays`, so one rule governs both. Add `"wss://u:p@relay.test"` and `"wss://relay.test#x"` to Test 13's `relayShapes`.
+
+### IN-07 (NEW): `deliverMany`'s "never throws" contract now depends on the adapter's publish result being an object
+
+**File:** `src/client/transport/nostr/welcome-delivery.ts:152-165`
+**Issue:** Before CR-02, a fulfilled publish value was passed through untouched. Now `hasAck(result.value)` and `Object.values(result.value)` run inside the `settled.map` callback, outside the `allSettled` boundary. A non-conforming BYO `NostrNetworkInterface` whose `publish` resolves `undefined`/`null` makes `deliverMany` throw a `TypeError`. On the founding path that throw propagates out of `GroupFactory.create()` after `save(true)`, leaving a persisted group that is untracked and has an empty report. `GroupRuntime` has a defensive catch for this; `MarmotGroup.deliverFoundingWelcomes` and `retryWelcome` do not. The types forbid the input, but the class documents itself as "never throws".
+**Fix:** Guard the classification, for example `const value = result.value ?? {};`, or wrap the per-entry mapping in `try`/`catch` that yields `{ kind: "failed", recipient, error }`.
+
+### IN-08 (NEW): Stale D-09/R-05 references in test headers after the CR-01 supersession
+
+**File:** `src/client/__tests__/founding-create.test.ts:38-39, 97`; `src/__tests__/integration/founding-group-create-join-message.test.ts:16-20, 116-117`
+**Issue:**
+- The `founding-create.test.ts` header still lists "D-09 relay-less delivery" as part of the plan 10-04 matrix, and the `describe` title still cites D-09/R-05 as if they were live decisions.
+- The integration test still justifies supplying relays "per R-05" and calls Test 13 "the relay-less counterpart". Test 13 is now a refusal test, and relays are mandatory, not a deliberate choice.
+
+**Fix:** Update both headers to cite CR-01 (relays are required for a founding create) and describe Test 13 as the refusal test.
 
 ---
 
