@@ -356,8 +356,7 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
     const invitee2Event = await publishKeyPackage(inviteeClients[1]!);
 
-    const reachableLookup =
-      mockNetwork.getUserInboxRelays.bind(mockNetwork);
+    const reachableLookup = mockNetwork.getUserInboxRelays.bind(mockNetwork);
     mockNetwork.getUserInboxRelays = async (pubkey: string) => {
       if (pubkey === invitee2Pubkey) return [];
       return reachableLookup(pubkey);
