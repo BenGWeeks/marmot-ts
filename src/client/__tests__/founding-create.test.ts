@@ -7,18 +7,21 @@
  * observable `PendingPublish` window), D-03 (only epoch 1 is durable — one
  * write), D-04/D-10/D-12 (in-memory, ignorable, never-thrown per-invitee
  * Welcome outcomes), D-08 (`options.invitees` on the existing `create()`;
- * omitting it keeps today's exact solo-create behaviour and code path), D-09
- * (relay-less founding create is supported, not an error, but the group can
- * never carry ordinary traffic), and D-13 (duplicate-invitee refusal and the
- * one-distinct-Welcome-per-invitee assertion), plus risks R-01 (an
- * unconfirmed `foundingGroupCreated` result must be caught, not silently
- * left as stale staged state — proven here as "no persisted artifact ever
- * observes epoch 0 for a founding create"), R-04 (the delivery report is
- * non-durable and ignorable — a group reloaded from the store reports no
- * pending Welcomes even though an invitee was never reached; the only
- * recovery is the spec's re-invite path), and R-05 (a relay-less founding
- * create still delivers Welcomes via NIP-65 inbox relays, but the group is
- * unusable for messaging).
+ * omitting it keeps today's exact solo-create behaviour and code path), and
+ * D-13 (duplicate-invitee refusal and the one-distinct-Welcome-per-invitee
+ * assertion), plus risks R-01 (an unconfirmed `foundingGroupCreated` result
+ * must be caught, not silently left as stale staged state — proven here as
+ * "no persisted artifact ever observes epoch 0 for a founding create") and
+ * R-04 (the delivery report is non-durable and ignorable — a group reloaded
+ * from the store reports no pending Welcomes even though an invitee was
+ * never reached; the only recovery is the spec's re-invite path).
+ *
+ * D-09 (the original decision allowing a relay-less founding create) and
+ * R-05 (its FOUND-05 testing constraint) are **SUPERSEDED (2026-09-28, gap
+ * closure — fail closed, see 10-VERIFICATION.md CR-01)**: `create()` now
+ * refuses a founding create with invitees and no valid group relays before
+ * any MLS state exists (Test 13, rewritten below). Test 15 pins the
+ * still-allowed solo relay-less create (CR-01's scope boundary).
  *
  * See `refs/marmot/protocol-core/joining.md` lines 21-30 (the
  * founding-creation exception: a founding Add Commit from epoch 0 to epoch 1
@@ -40,15 +43,11 @@
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 import { verifiedSymbol } from "applesauce-core/helpers";
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MarmotClient } from "../marmot-client.js";
 import { GroupFactory } from "../group-factory.js";
 import { GroupsManager } from "../groups-manager.js";
-import {
-  createApplicationMessageIntent,
-  createChatRumor,
-} from "../group/application-message.js";
 import {
   deserializeClientState,
   type SerializedClientState,
@@ -95,7 +94,7 @@ class RecordingKeyValueStore<T> implements GenericKeyValueStore<T> {
   }
 }
 
-describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08/D-09/D-10/D-12/D-13; R-01/R-04/R-05)", () => {
+describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08/D-09/D-10/D-12/D-13; R-01/R-04/R-05; CR-01)", () => {
   let mockNetwork: MockNetwork;
   let adminAccount: PrivateKeyAccount<any>;
   let adminGroupStateStore: InMemoryKeyValueStore<SerializedClientState>;
@@ -343,11 +342,12 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
   /**
    * Test 9-12 shared setup: founds a two-invitee group **with group relays
    * supplied** (so the founding Welcome rumor itself is constructible —
-   * `createWelcomeRumor` requires a non-empty `relays` tag; see the
-   * discovered-defect note on Test 13 below) where the second invitee's own
-   * NIP-65 inbox-relay lookup resolves to an empty list (published no inbox
-   * relays of their own), so `deliver` throws "No relays available" for
-   * exactly that recipient while the first invitee succeeds independently.
+   * `createWelcomeRumor` requires a non-empty `relays` tag; see CR-01 in
+   * Test 13 below, which now enforces this at `create()`'s entry point)
+   * where the second invitee's own NIP-65 inbox-relay lookup resolves to an
+   * empty list (published no inbox relays of their own), so `deliver` throws
+   * "No relays available" for exactly that recipient while the first
+   * invitee succeeds independently.
    */
   async function createFoundingWithSecondInviteeUnreachable() {
     const adminPubkey = await adminAccount.signer.getPublicKey();
@@ -460,53 +460,64 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     expect(reloaded.info.members.pubkeys).toHaveLength(3);
   });
 
-  it("Test 13 (D-09/R-05): a relay-less founding create still merges the founding Add at epoch 1, but every Welcome fails and the group cannot carry ordinary group traffic", async () => {
+  it("Test 13 (CR-01; supersedes D-09/R-05): a founding create with invitees but no valid group relays throws before any MLS state is created, and nothing is persisted, tracked or published", async () => {
+    // Per the user's 2026-09-28 locked decision (10-VERIFICATION.md CR-01),
+    // this reverses D-09: a founding create with invitees and no valid group
+    // relays now fails closed, before any MLS state exists, instead of
+    // silently producing a persisted group with N phantom members whose
+    // Welcomes all fail (createWelcomeRumor() throws unconditionally for
+    // every recipient when the relays tag would be empty).
     const adminPubkey = await adminAccount.signer.getPublicKey();
     const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
     const invitee2Event = await publishKeyPackage(inviteeClients[1]!);
 
-    // No `relays` option at all. CONTEXT.md's Pinned expectations and
-    // RESEARCH.md's "D-09 footgun, confirmed precisely" analysis both
-    // predicted that the NIP-65 inbox path still works with an empty
-    // group-relay list — but that analysis considered only
-    // `NostrWelcomeDelivery.deliver()`'s relay resolution, not
-    // `createWelcomeRumor()` (src/core/welcome-event.ts), which
-    // *unconditionally* throws "Welcome rumor requires a non-empty relays
-    // tag" before any inbox-relay lookup or publish is even attempted. This
-    // is a genuine discrepancy discovered while writing this test (recorded
-    // in the plan's SUMMARY as a deviation, not silently corrected in the
-    // plan text): a relay-less founding create's Welcome delivery fails for
-    // *every* invitee, not just invitees lacking their own published inbox
-    // relays.
-    const group = await adminClient.groups.create("Founding Group", {
-      adminPubkeys: [adminPubkey],
-      invitees: [invitee1Event, invitee2Event],
-    });
+    const signEventSpy = vi.spyOn(adminAccount.signer, "signEvent");
+    const createdSpy = vi.fn();
+    adminClient.groups.on("created", createdSpy);
 
-    // D-12 still holds: canonical state reaches epoch 1 with every member,
-    // independent of the (here, total) Welcome delivery failure.
-    expect(group.state.groupContext.epoch).toBe(1n);
+    const relayShapes: (string[] | undefined)[] = [
+      undefined,
+      [],
+      [""],
+      ["https://relay.example.com"],
+      ["not a relay url"],
+      ["wss://mock-relay.test", ""],
+    ];
+
+    for (const relays of relayShapes) {
+      const options =
+        relays === undefined
+          ? {
+              adminPubkeys: [adminPubkey],
+              invitees: [invitee1Event, invitee2Event],
+            }
+          : {
+              adminPubkeys: [adminPubkey],
+              relays,
+              invitees: [invitee1Event, invitee2Event],
+            };
+      await expect(
+        adminClient.groups.create("Founding Group", options),
+      ).rejects.toThrow(
+        /founding invitees require a non-empty list of valid group relays/,
+      );
+    }
+
+    // The refusal preceded creator KeyPackage generation entirely — the
+    // 0x8009 account-identity proof it carries is signed via signEvent — so
+    // nothing MLS-related was ever built, let alone persisted or published.
+    expect(signEventSpy).not.toHaveBeenCalled();
+    expect(await adminGroupStateStore.keys()).toHaveLength(0);
+    expect(adminClient.groups.loaded).toHaveLength(0);
+    expect(await adminClient.groups.listIds()).toHaveLength(0);
+    expect(createdSpy).not.toHaveBeenCalled();
 
     const giftWraps = mockNetwork.events.filter((e) => e.kind === 1059);
+    const commitEvents = mockNetwork.events.filter(
+      (e) => e.kind === GROUP_EVENT_KIND,
+    );
     expect(giftWraps).toHaveLength(0);
-    expect(group.welcomeDeliveries).toHaveLength(2);
-    expect(
-      group.welcomeDeliveries.every((outcome) => outcome.kind === "failed"),
-    ).toBe(true);
-    expect(group.pendingWelcomes).toHaveLength(2);
-
-    // R-05: the resulting group also has no Nostr routing component and can
-    // never carry ordinary group traffic — the engine refuses to build any
-    // outbound group-event envelope at all (`createGroupEvent` requires the
-    // routing component). Use `group.session` directly (the documented
-    // advanced API) to bypass the convergence outbound queue — which would
-    // otherwise hold this application message until the quiescence window
-    // elapses — and observe the immediate refusal.
-    expect(group.relays).toEqual([]);
-    const rumor = createChatRumor({ pubkey: adminPubkey, content: "hello" });
-    await expect(
-      group.session.send(createApplicationMessageIntent(rumor)),
-    ).rejects.toThrow();
+    expect(commitEvents).toHaveLength(0);
   });
 
   it("Test 14: a founding create driven through a GroupsManager configured with a rewind store binds the supplied history tree before the single save", async () => {
@@ -534,5 +545,30 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     ).resolves.toBeDefined();
 
     expect((await rewindStore.keys()).length).toBeGreaterThan(0);
+  });
+
+  it("Test 15 (CR-01 scope): a solo create without relays — invitees omitted or empty — is still allowed and stays at epoch 0", async () => {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+
+    const soloOmitted = await adminClient.groups.create("Solo relay-less", {
+      adminPubkeys: [adminPubkey],
+    });
+    expect(soloOmitted.state.groupContext.epoch).toBe(0n);
+
+    const soloEmptyInvitees = await adminClient.groups.create(
+      "Solo relay-less, empty invitees",
+      {
+        adminPubkeys: [adminPubkey],
+        invitees: [],
+      },
+    );
+    expect(soloEmptyInvitees.state.groupContext.epoch).toBe(0n);
+
+    const giftWraps = mockNetwork.events.filter((e) => e.kind === 1059);
+    const commitEvents = mockNetwork.events.filter(
+      (e) => e.kind === GROUP_EVENT_KIND,
+    );
+    expect(giftWraps).toHaveLength(0);
+    expect(commitEvents).toHaveLength(0);
   });
 });
