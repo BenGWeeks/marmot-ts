@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 7: Account Identity Proof Component (0x8009) + Legacy Clean Cut** - Kind-450 proof-class module, KeyPackage/leaf negotiation, and full removal of the legacy `0xf2f1` extension with no fallback (completed 2026-09-14)
 - [x] **Phase 8: GroupContext Profile Requirement & Legality-Seam Extension** - `0x8009` required on every group and enforced identically across create, invite, join, inbound, and convergence seams (completed 2026-09-15)
 - [x] **Phase 9: Self-Update / Replacement-Leaf Identity Binding** - Leaf replacement preserves account identity and keeps the proof bound to the new signature key (completed 2026-09-24)
-- [ ] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only (gap closure 10-05..10-07 pending, 2026-09-28)
+- [x] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only (gap closure 10-05..10-07 pending, 2026-09-28) (completed 2026-09-28)
 - [ ] **Phase 11: Interop Fixtures, Exports Snapshot & QA Gate** - Rust-signed fixture verification, exports snapshot, and a green six-runtime suite
 
 ## Phase Details
@@ -182,7 +182,7 @@ during planning (`/gsd-plan-phase --research-phase 10`).
 4. Each invitee's Welcome is delivered independently; a failed delivery is retryable per invitee and never rolls back the group.
 5. An invitee who receives their Welcome joins at epoch 1 and can exchange messages with the creator.
 
-**Plans**: 4/7 plans complete
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
@@ -200,9 +200,9 @@ Plans:
 
 **Gap closure** _(from 10-VERIFICATION.md / 10-REVIEW.md; all three in one wave, disjoint files)_
 
-- [ ] 10-05-PLAN.md — CR-01: fail closed in `GroupFactory.create()` when invitees are supplied without valid relays (supersedes D-09/R-05), correct stale JSDoc/docs, rewrite Test 13, record the supersession in 10-CONTEXT.md
-- [ ] 10-06-PLAN.md — CR-02: `deliverMany()` classifies unacknowledged Welcome publishes as failed via the shared `hasAck`, proven at unit, `MarmotGroup` retry and `GroupRuntime` ordinary-invite levels
-- [ ] 10-07-PLAN.md — CR-03: engine `foundingAdd` guard (epoch 0, sole local leaf, no unapplied proposals, non-empty Add-only intent) with a rejection test per branch
+- [x] 10-05-PLAN.md — CR-01: fail closed in `GroupFactory.create()` when invitees are supplied without valid relays (supersedes D-09/R-05), correct stale JSDoc/docs, rewrite Test 13, record the supersession in 10-CONTEXT.md
+- [x] 10-06-PLAN.md — CR-02: `deliverMany()` classifies unacknowledged Welcome publishes as failed via the shared `hasAck`, proven at unit, `MarmotGroup` retry and `GroupRuntime` ordinary-invite levels
+- [x] 10-07-PLAN.md — CR-03: engine `foundingAdd` guard (epoch 0, sole local leaf, no unapplied proposals, non-empty Add-only intent) with a rejection test per branch
 
 ### Phase 11: Interop Fixtures, Exports Snapshot & QA Gate
 
@@ -241,7 +241,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 7. Account Identity Proof Component (0x8009) + Clean Cut   | v2.0      | 8/8 | Complete    | 2026-09-14 |
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
-| 10. Founding Group Creation via Welcome                    | v2.0      | 4/4 | Complete   | 2026-09-28 |
+| 10. Founding Group Creation via Welcome                    | v2.0      | 7/7 | Complete   | 2026-09-28 |
 | 11. Interop Fixtures, Exports Snapshot & QA Gate           | v2.0      | 0/TBD           | Not started | -          |
 
 ## Backlog
