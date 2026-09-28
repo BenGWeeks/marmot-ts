@@ -215,11 +215,17 @@ the added envelope/component exports — the milestone is shippable.
 1. The full Vitest suite is green on Node 20, Node 22, Node 24, Deno 2, and Bun latest/1.1.
 2. The public exports snapshot (`src/__tests__/exports.test.ts`) reflects the removed legacy proof exports and the added envelope/component exports, with no stale `0xf2f1` references remaining.
 
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD
+- [ ] 11-01-PLAN.md — Comment hygiene: D-01 dead pointers to the deleted legacy proof module (QA-05 commit); D-10 MIP-NN citations rewritten to topic spec paths (separate `chore(11)` commit)
+- [ ] 11-02-PLAN.md — Inline export snapshots for every public subpath except `./mls` plus a self-tested legacy-export guard (QA-05, D-02/D-03/D-04); package-smoke signer fix (QA-04, D-06)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 11-03-PLAN.md — QA gate: verify D-07/D-08/D-09, full local gate (lint, build, package smoke, Node/Deno/Bun suite + conformance), user push checkpoint, CI evidence for Node 20/22/24, Deno v2.x, Bun latest/1.1
 
 ## Progress
 
@@ -240,7 +246,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
 | 10. Founding Group Creation via Welcome                    | v2.0      | 7/7 | Complete    | 2026-09-28 |
-| 11. Interop Fixtures, Exports Snapshot & QA Gate           | v2.0      | 0/TBD           | Not started | -          |
+| 11. Exports Snapshot & QA Gate                             | v2.0      | 0/3 | Not started | -          |
 
 ## Backlog
 
