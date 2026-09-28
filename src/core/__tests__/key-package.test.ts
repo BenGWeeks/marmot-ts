@@ -40,10 +40,9 @@ import { validateKeyPackageAccountIdentityProof } from "../components/account-id
 import { LAST_RESORT_EXTENSION_TYPE } from "../protocol.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 
-// The legacy `marmot.account-identity-proof.v2` custom LeafNode extension
-// (`0xf2f1`, `../account-identity-proof.js`). Referenced here only as a
-// literal to assert its absence (CUT-01) -- this test file imports nothing
-// from the legacy module.
+// The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
+// whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
+// a literal to assert its absence and rejection (CUT-01/CUT-02).
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
 const ZERO_AUX = new Uint8Array(32);

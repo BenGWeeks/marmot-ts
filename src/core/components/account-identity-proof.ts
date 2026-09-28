@@ -12,9 +12,10 @@
  * external-signer produce validation live in `../authorization-proof.js` and are reused
  * here, never re-implemented.
  *
- * This is a purely additive replacement for the legacy `marmot.account-identity-proof.v2`
- * custom LeafNode extension (`0xf2f1`, `../account-identity-proof.js`), which this module
- * does not import from or modify.
+ * It replaces the legacy `marmot.account-identity-proof.v2` custom LeafNode extension
+ * (`0xf2f1`), whose module was deleted in the Phase 7 clean cut (`ef756c8`). `0xf2f1`
+ * survives here only as a private constant so the validators below can detect and reject
+ * legacy material (CUT-02); it is never produced or accepted.
  *
  * @see refs/marmot/app-components/account-identity-proof-v2.md
  * @see refs/marmot/foundation/authorization-proofs.md
@@ -65,8 +66,8 @@ const ACCOUNT_IDENTITY_PROOF_CONTENT =
 
 /**
  * MLS signature scheme code points (RFC 9420 / IANA TLS SignatureScheme), keyed by MLS
- * ciphersuite id. Re-homed verbatim from the verified legacy table
- * (`../account-identity-proof.js`'s `MLS_SIGNATURE_SCHEME_BY_CIPHERSUITE`) per the research
+ * ciphersuite id. Re-homed verbatim from the verified `MLS_SIGNATURE_SCHEME_BY_CIPHERSUITE`
+ * table of the deleted legacy proof module (`ef756c8`) per the research
  * "Don't Hand-Roll" guidance — these values are already verified against
  * `refs/mdk` `ciphersuite.signature_algorithm() as u16` and must not be re-derived.
  */
@@ -231,8 +232,8 @@ export async function produceAccountIdentityProof(
 // ---------------------------------------------------------------------------
 
 /**
- * The deployed legacy `marmot.account-identity-proof.v2` custom LeafNode extension type
- * (`../account-identity-proof.js`). Not exported: CUT-01 forbids any legacy export from this
+ * The legacy `marmot.account-identity-proof.v2` custom LeafNode extension type, whose module
+ * was deleted in `ef756c8`. Not exported: CUT-01 forbids any legacy export from this
  * module — it exists here only so validators can detect and reject it (Pitfall 10).
  */
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;

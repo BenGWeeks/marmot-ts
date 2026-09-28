@@ -68,10 +68,9 @@ const DARKMATTER_REQUIRED_APP_COMPONENTS = [
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, // 0x8009
 ];
 
-// The legacy `marmot.account-identity-proof.v2` custom LeafNode extension
-// (`0xf2f1`, `../account-identity-proof.js`). Referenced here only as a
-// literal to assert its absence (CUT-01) -- this test file imports nothing
-// from the legacy module.
+// The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
+// whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
+// a literal to assert its absence and rejection (CUT-01/CUT-02).
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
 describe("darkmatter invite compatibility", () => {
