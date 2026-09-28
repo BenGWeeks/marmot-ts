@@ -57,7 +57,7 @@ async function createTestGroupState(
   return { clientState, kp };
 }
 
-describe("MarmotGroup.ingest() commit race ordering (MIP-03)", () => {
+describe("MarmotGroup.ingest() commit race ordering (protocol-core/group-messaging.md)", () => {
   it("orders same-epoch commits by content-derived commit_digest, ignoring transport fields", async () => {
     const adminAccount = testAccount(6);
     const adminPubkey = adminAccount.pubkey;
@@ -211,7 +211,7 @@ describe("MarmotGroup.ingest() commit race ordering (MIP-03)", () => {
     });
 
     // Create two competing commits from the same baseline ADMIN state (epoch 1).
-    // Per MIP-03, only admins are allowed to send commits, so both commits must be
+    // Per `protocol-core/group-messaging.md` (Commit authorization), only admins are allowed to send commits, so both commits must be
     // authored by the admin leaf.
     //
     // ts-mls v2 treats ClientState as immutable: createCommit() returns a newState

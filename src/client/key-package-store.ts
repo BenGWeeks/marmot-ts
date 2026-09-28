@@ -208,7 +208,7 @@ export class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents> {
   ): Promise<void> {
     const key = this.#resolveKey(ref);
 
-    // MIP-00: the `i` tag IS the KeyPackageRef of the event body. Receivers MUST
+    // The `i` tag IS the KeyPackageRef of the event body. Receivers MUST
     // verify it against the decoded KeyPackage and reject on mismatch
     // (transports/nostr.md §KeyPackage publication) so a forged `i` tag cannot
     // make us index a package under a ref that is not its own. Decoding here

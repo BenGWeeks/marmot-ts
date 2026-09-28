@@ -155,10 +155,10 @@ export function getKeyPackageNostrPubkey(event: NostrEvent): string {
 }
 
 /**
- * Returns the KeyPackageRef (MIP-00 `i` tag value) from a kind 30443
+ * Returns the KeyPackageRef (the `i` tag value, `transports/nostr.md`) from a kind 30443
  * KeyPackage event.
  *
- * Per MIP-00, KeyPackage events MUST include this tag.
+ * Per `transports/nostr.md` (KeyPackage publication), KeyPackage events MUST include this tag.
  */
 export function getKeyPackageReference(event: NostrEvent): string | undefined {
   return getTagValue(event, "i");

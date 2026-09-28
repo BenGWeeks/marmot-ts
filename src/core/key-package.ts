@@ -125,7 +125,7 @@ export async function generateKeyPackage({
     throw new Error(
       `generateKeyPackage: lifetime range ${resolvedLifetime.notAfter - resolvedLifetime.notBefore}s exceeds the 7,261,200s (84-day) cap`,
     );
-  // Marmot requires support for last_resort capability signaling (MIP-00),
+  // Marmot requires support for last_resort capability signaling (`foundation/key-packages.md`),
   // but individual KeyPackages may be single-use or last-resort reusable.
   // `isLastResort` controls whether this KeyPackage is marked reusable.
   const resolvedExtensions = isLastResort

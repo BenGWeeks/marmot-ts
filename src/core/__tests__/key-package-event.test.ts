@@ -616,7 +616,7 @@ describe("getKeyPackageIdentifier", () => {
   });
 });
 
-describe("spec compliance (MIP-00)", () => {
+describe("spec compliance (transports/nostr.md, foundation/key-packages.md)", () => {
   const VALID_ACCOUNT = testAccount(5);
   const validPubkey = VALID_ACCOUNT.pubkey;
   const testD =

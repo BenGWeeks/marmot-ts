@@ -66,7 +66,7 @@ export function ensureMarmotCapabilities(
   if (!proposals.includes(appDataUpdateProposalType))
     proposals.push(appDataUpdateProposalType);
 
-  // self_remove proposal for member departure (MIP-03).
+  // self_remove proposal for member departure (`protocol-core/member-departure.md`).
   if (!proposals.includes(selfRemoveProposalType))
     proposals.push(selfRemoveProposalType);
 
@@ -91,7 +91,7 @@ export function ensureMarmotCapabilities(
  * `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS required capability — it is
  * never listed here. Required proposals are `app_data_update` (`0x0008`) and
  * `self_remove` (`0x000a`); the `self_remove` requirement matches a
- * darkmatter MIP-03 client (which registers the self-remove feature as
+ * darkmatter client (`protocol-core/member-departure.md`; it registers the self-remove feature as
  * Required, advertising proposal type 10 in both leaf and required
  * capabilities). Lists are sorted ascending to mirror the Rust `BTreeSet`
  * ordering; `credentialTypes` is empty.

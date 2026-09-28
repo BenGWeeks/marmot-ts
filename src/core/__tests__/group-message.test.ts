@@ -43,8 +43,8 @@ async function createTestState(account: PrivateKeyAccount<any>) {
   return { clientState, ciphersuite };
 }
 
-describe("group message encryption (MIP-03)", () => {
-  it("encrypts and decrypts with MIP-03 ChaCha20-Poly1305 envelope", async () => {
+describe("group message encryption (transports/nostr.md)", () => {
+  it("encrypts and decrypts with the kind-445 ChaCha20-Poly1305 envelope", async () => {
     const { clientState, ciphersuite } = await createTestState(testAccount(6));
 
     const { message } = await createApplicationMessage({

@@ -486,7 +486,7 @@ describe("MarmotGroup lifecycle (group-state.md)", () => {
   });
 });
 
-describe("MarmotGroup admin verification (MIP-03)", () => {
+describe("MarmotGroup admin verification (protocol-core/group-messaging.md)", () => {
   it("rejects commits from non-admin members", async () => {
     const adminAccount = testAccount(6);
     const adminPubkey = adminAccount.pubkey;
@@ -543,7 +543,7 @@ describe("MarmotGroup admin verification (MIP-03)", () => {
 
     // Non-admin attempts to create a commit (should be rejected by admin verification)
     // Create a commit that includes proposals (not a self-update), which MUST remain
-    // admin-only under MIP-03.
+    // admin-only under `protocol-core/group-messaging.md` (Commit authorization).
     const thirdAccount = testAccount(11);
     const thirdPubkey = thirdAccount.pubkey;
     const thirdCredential = createCredential(thirdPubkey);
@@ -600,7 +600,7 @@ describe("MarmotGroup admin verification (MIP-03)", () => {
     });
 
     // Use the same policy MarmotGroup.ingest() uses, but call ts-mls directly.
-    // This keeps the test focused on the MIP-03 rule (admin-only commits), and
+    // This keeps the test focused on the `protocol-core/group-messaging.md` rule (admin-only commits), and
     // avoids unrelated NIP-44 decryption / retry behavior.
     const adminCallback = createAdminCommitPolicyCallback({
       ratchetTree: group.state.ratchetTree,
@@ -768,7 +768,7 @@ describe("MarmotGroup admin verification (MIP-03)", () => {
     expect(callback(addCommit([]) as never)).toBe("reject");
   });
 
-  it("accepts non-admin self-update commits (no proposals) (MIP-02)", async () => {
+  it("accepts non-admin self-update commits (no proposals) (protocol-core/group-messaging.md)", async () => {
     const adminAccount = testAccount(6);
     const adminPubkey = adminAccount.pubkey;
     const nonAdminAccount = testAccount(9);

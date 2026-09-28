@@ -254,7 +254,7 @@ describe("generateKeyPackage", () => {
     );
   });
 
-  it("should include Marmot Group Data Extension in capabilities", async () => {
+  it("should include the app_data_dictionary extension in capabilities", async () => {
     const credential = createCredential(validPubkey);
     const ciphersuiteImpl = await getCiphersuiteImpl(
       SUITE,

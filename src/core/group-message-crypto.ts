@@ -41,7 +41,7 @@ function epochOf(state: ClientState): string {
 }
 
 /**
- * Derives the MIP-03 group-event encryption key for a group epoch.
+ * Derives the kind-445 group-event encryption key for a group epoch (`transports/nostr.md`).
  *
  * Uses the MLS Exporter (RFC 9420 §8.5) with label "marmot" and context
  * "group-event" to produce a 32-byte ChaCha20-Poly1305 key.
@@ -117,7 +117,7 @@ export async function decryptGroupMessageEvent(
 }
 
 /**
- * Encrypts the content of a group event using MIP-03.
+ * Encrypts the content of a kind-445 group event (`transports/nostr.md`).
  *
  * @returns The encrypted content
  */

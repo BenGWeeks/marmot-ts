@@ -41,8 +41,8 @@ export type CreateKeyPackageEventOptions = {
   /**
    * Whether to include the NIP-70 protected tag (["-"]).
    *
-   * Per MIP-00 this SHOULD be omitted by default because many relays reject
-   * protected events.
+   * The current kind-30443 tag set (`transports/nostr.md`, KeyPackage publication) does not
+   * include it, so it is omitted by default; many relays also reject protected events.
    */
   protected?: boolean;
 };
@@ -91,7 +91,7 @@ async function createKeyPackageEventInternal(
   });
 
   // Also include extensions from leaf node capabilities to signal support
-  // This ensures Marmot Group Data Extension (0xf2ee) is included in the event
+  // This ensures advertised capability extensions (e.g. app_data_dictionary) are included in the event
   if (keyPackage.leafNode.capabilities?.extensions) {
     for (const extType of keyPackage.leafNode.capabilities.extensions) {
       // Only add if not already present (avoid duplicates)
@@ -103,7 +103,7 @@ async function createKeyPackageEventInternal(
   }
 
   // Filter out GREASE values from the extension types
-  // We only want to include actual extensions (last_resort and Marmot Group Data Extension)
+  // We only want to include real extension ids (e.g. last_resort, app_data_dictionary), not GREASE
   const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
     // Parse the hex value back to number to check if it's a GREASE value
     const extType = parseInt(hexValue);

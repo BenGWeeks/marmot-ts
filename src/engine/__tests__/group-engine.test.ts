@@ -199,7 +199,7 @@ describe("MarmotGroupEngine ingest – own-echo dedup", () => {
   });
 });
 
-describe("MarmotGroupEngine admin verification (MIP-03)", () => {
+describe("MarmotGroupEngine admin verification (protocol-core/group-messaging.md)", () => {
   it("rejects commit send from non-admin members", async () => {
     const adminAccount = testAccount(6);
     const nonAdminAccount = testAccount(9);
