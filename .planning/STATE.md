@@ -3,16 +3,16 @@ gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Account identity proof v2
 current_phase: 11
-current_phase_name: Exports Snapshot & QA Gate
+current_phase_name: exports-snapshot-qa-gate
 status: executing
 stopped_at: Phase 11 context gathered
-last_updated: "2026-09-28T22:42:53.824Z"
+last_updated: "2026-09-28T22:54:00.956Z"
 last_activity: 2026-09-28
-last_activity_desc: Phase 10 complete, transitioned to Phase 11
+last_activity_desc: Phase 11 execution started
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 24
+  total_plans: 27
   completed_plans: 24
   percent: 83
 ---
@@ -24,14 +24,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** A downstream client can join a Marmot group and exchange messages that interoperate, byte-for-byte, with any spec-conformant peer (incl. the Rust MDK reference), across every supported runtime.
-**Current focus:** Phase 10 — founding-group-creation-via-welcome
+**Current focus:** Phase 11 — exports-snapshot-qa-gate
 
 ## Current Position
 
-Phase: 11 — Exports Snapshot & QA Gate
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-09-28 — Phase 10 complete, transitioned to Phase 11
+Phase: 11 (exports-snapshot-qa-gate) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 11
+Last activity: 2026-09-28 — Phase 11 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
