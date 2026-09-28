@@ -35,7 +35,8 @@ Covers FOUND-01..05.
   reach it.
 - **`createSimpleGroup` seeds `transport.nostr.routing` only when relays are supplied** (`group.ts:147-151`),
   but Welcome delivery uses `groupData.relays` as its inbox-lookup fallback. This makes "invitees, no relays" a
-  live footgun. D-09 accepts it deliberately.
+  live footgun. D-09 accepts it deliberately. *(D-09 superseded 2026-09-28 — create() now fails closed; see
+  10-VERIFICATION.md CR-01.)*
 
 **Not in this phase:**
 
@@ -137,14 +138,24 @@ a named alternative.**
 
   *Rejected:* a separate `createWithInvitees()` entry point.
 
-- **D-09: Allow invitees with no relays — inbox relays only.** Create the group and deliver via each
-  recipient's NIP-65 inbox relays with no group-relay fallback. **Not** an error case.
+- **~~D-09: Allow invitees with no relays — inbox relays only.~~ — SUPERSEDED (2026-09-28, gap closure — fail closed, see 10-VERIFICATION.md CR-01)**
+
+  *Original decision text (retained for history):* Create the group and deliver via each recipient's NIP-65
+  inbox relays with no group-relay fallback. **Not** an error case.
 
   **Accepted consequence:** a group created without relays has no `transport.nostr.routing` component and
   therefore cannot carry ordinary traffic afterwards — a *successful* founding create can still produce a group
   that is unusable for messaging. See R-05: this directly constrains how FOUND-05 can be tested.
 
   *Rejected:* throwing at the call site before any KeyPackage material is consumed.
+
+  **Superseding decision (2026-09-28, user-approved gap closure):** `GroupFactory.create()` now throws before
+  any MLS state is created when `invitees` is non-empty and `relays` is absent, empty, or contains an
+  invalid/empty relay URL. The previously rejected alternative — throwing at the call site before any
+  KeyPackage material is consumed — is now the adopted one. Reason: `createWelcomeRumor()`'s unconditional
+  non-empty relays-tag requirement made the accepted consequence above far worse than recorded — 100% Welcome
+  failure plus a permanently unusable group with phantom members (see `deferred-items.md`; `10-REVIEW.md`
+  CR-01). A solo create without relays is unaffected. Implementing plan: 10-05.
 
 - **D-10: `create()` still returns `MarmotGroup`; per-invitee outcomes are state on the group.** e.g.
   `group.pendingWelcomes` alongside `retryWelcome()`. **No existing caller changes.**
@@ -203,9 +214,11 @@ a named alternative.**
   raised. A crash or an inattentive caller loses an invitee silently — a member sits at epoch 1 never having
   been told, with the Welcome artifact gone. Only recovery is the spec's re-invite with a fresh KeyPackage.
   **Obligation:** an explicit acceptance criterion plus a documented note for downstream apps.
-- **R-05 (from D-09):** FOUND-05 ("invitee joins at epoch 1 and can exchange messages with the creator") is
-  only satisfiable when relays were supplied. **Obligation:** the FOUND-05 test must supply relays, and the
-  relay-less case needs its own documented expectation.
+- **R-05 (from D-09) — SUPERSEDED (2026-09-28, gap closure — fail closed, see 10-VERIFICATION.md CR-01):**
+  FOUND-05 ("invitee joins at epoch 1 and can exchange messages with the creator") is only satisfiable when relays were supplied.
+  **Obligation:** the FOUND-05 test must supply relays, and the relay-less case needs its
+  own documented expectation. The FOUND-05 test still supplies relays, unaffected by CR-01; the relay-less
+  case's documented expectation is now that `create()` throws (`founding-create.test.ts` Test 13).
 
 ### Claude's Discretion
 
@@ -316,11 +329,11 @@ a named alternative.**
 - `src/client/transport/nostr/welcome-delivery.ts` — `NostrWelcomeDelivery.deliver()` does the NIP-59
   gift-wrap, resolves recipient inbox relays with a `groupRelays` fallback, and **throws when the resulting
   relay list is empty**. D-07 adds `deliverMany()` beside it; D-09 depends on the inbox-relay path working
-  without a group-relay fallback.
+  without a group-relay fallback. *(D-09 superseded 2026-09-28 — see D-09.)*
 - `src/client/group/invite.ts` `createInviteIntent()` — the reused trust boundary (D-11).
 - `src/core/group.ts` — `createGroup()` (`:52`), `createSimpleGroup()` (`:124`). Note `requiredIds` already
   picks up `0x8009` via `DEFAULT_GROUP_COMPONENT_IDS`, and the routing component is pushed **only** when
-  `relays.length > 0` (`:147-151`) — the D-09 footgun.
+  `relays.length > 0` (`:147-151`) — the D-09 footgun. *(D-09 superseded 2026-09-28 — see D-09.)*
 
 ### Established Patterns
 
