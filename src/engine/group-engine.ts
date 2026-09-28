@@ -1267,6 +1267,25 @@ export class MarmotGroupEngine<TEnvelope> {
         // means there are no staged proposals to bundle by reference at the
         // point a foundingAdd is legal to invoke (CR-03).
 
+        // CR-03: the Add-only rule applies to the intent's own, resolved
+        // proposals only -- NOT to `prepared.extraProposals` /
+        // `prepared.committedProposals` below, which may gain an
+        // engine-generated admin-policy splice (`#adminPolicySpliceFor` via
+        // `#prepareOutboundCommitProposals`). That splice is not
+        // caller-supplied and remains validated by the shared
+        // `#assertStagedCommitLegal` gate.
+        if (newProposals.length === 0) {
+          throw new Error("foundingAdd: requires at least one Add proposal");
+        }
+        const nonAddProposal = newProposals.find(
+          (p) => p.proposalType !== defaultProposalTypes.add,
+        );
+        if (nonAddProposal) {
+          throw new Error(
+            `foundingAdd: may only carry Add proposals; got proposal type ${nonAddProposal.proposalType}`,
+          );
+        }
+
         const prepared = this.#prepareOutboundCommitProposals(
           this.state,
           groupData.adminPubkeys,

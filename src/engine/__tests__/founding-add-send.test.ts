@@ -419,4 +419,75 @@ describe("foundingAdd invocation guard (CR-03)", () => {
     expect(engine.history.size).toBe(historySizeBefore);
     expect(wrapCount()).toBe(0);
   });
+
+  it("CR-03: refuses foundingAdd carrying a non-Add proposal, by value or via a ProposalAction", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+    const invitee = await inviteeKeyPackage(9, impl);
+    const removeLiteral = {
+      proposalType: defaultProposalTypes.remove,
+      remove: { removed: 0 },
+    } as const;
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [
+          proposeInviteUser(invitee.publicPackage),
+          removeLiteral,
+        ],
+      }),
+    ).rejects.toThrow(/foundingAdd: may only carry Add proposals/);
+
+    // Same regex via a ProposalAction resolving to the same Remove literal --
+    // proves the check runs on RESOLVED proposals, not on the raw intent shape.
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [
+          proposeInviteUser(invitee.publicPackage),
+          async () => removeLiteral,
+        ],
+      }),
+    ).rejects.toThrow(/foundingAdd: may only carry Add proposals/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
+  });
+
+  it("CR-03: refuses foundingAdd with no proposals", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const stateBefore = engine.state;
+    const historySizeBefore = engine.history.size;
+
+    await expect(
+      engine.send({
+        kind: "foundingAdd",
+        actorPubkey: adminPubkey,
+        extraProposals: [],
+      }),
+    ).rejects.toThrow(/foundingAdd: requires at least one Add proposal/);
+
+    expect(engine.state).toBe(stateBefore);
+    expect(engine.lifecycle).toBe("Stable");
+    expect(engine.history.size).toBe(historySizeBefore);
+    expect(wrapCount()).toBe(0);
+  });
 });
