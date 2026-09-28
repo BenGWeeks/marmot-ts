@@ -1,14 +1,24 @@
 /**
- * Client-level absence and single-write proofs for founding Current-profile
- * group creation via Welcome (FOUND-01, FOUND-03).
+ * Client-level absence, single-write, and behavioural-matrix proofs for
+ * founding Current-profile group creation via Welcome (FOUND-01, FOUND-02,
+ * FOUND-03, FOUND-04).
  *
  * Covers decisions D-01 (stage the founding Add and confirm it with no
  * observable `PendingPublish` window), D-03 (only epoch 1 is durable — one
- * write), and D-08 (`options.invitees` on the existing `create()`; omitting
- * it keeps today's exact solo-create behaviour and code path), plus risk
- * R-01 (an unconfirmed `foundingGroupCreated` result must be caught, not
- * silently left as stale staged state — proven here as "no persisted
- * artifact ever observes epoch 0 for a founding create").
+ * write), D-04/D-10/D-12 (in-memory, ignorable, never-thrown per-invitee
+ * Welcome outcomes), D-08 (`options.invitees` on the existing `create()`;
+ * omitting it keeps today's exact solo-create behaviour and code path), D-09
+ * (relay-less founding create is supported, not an error, but the group can
+ * never carry ordinary traffic), and D-13 (duplicate-invitee refusal and the
+ * one-distinct-Welcome-per-invitee assertion), plus risks R-01 (an
+ * unconfirmed `foundingGroupCreated` result must be caught, not silently
+ * left as stale staged state — proven here as "no persisted artifact ever
+ * observes epoch 0 for a founding create"), R-04 (the delivery report is
+ * non-durable and ignorable — a group reloaded from the store reports no
+ * pending Welcomes even though an invitee was never reached; the only
+ * recovery is the spec's re-invite path), and R-05 (a relay-less founding
+ * create still delivers Welcomes via NIP-65 inbox relays, but the group is
+ * unusable for messaging).
  *
  * See `refs/marmot/protocol-core/joining.md` lines 21-30 (the
  * founding-creation exception: a founding Add Commit from epoch 0 to epoch 1
@@ -16,19 +26,29 @@
  * needs it) and `refs/marmot/protocol-core/publish-lifecycle.md` lines 66-78
  * (each resulting epoch-1 Welcome is a separate retryable per-invitee
  * delivery obligation; a Welcome delivery succeeds or fails independently
- * and does not affect canonical group state).
+ * and does not affect canonical group state; consumed KeyPackage material is
+ * not restorable and the creator MAY re-invite with a fresh KeyPackage
+ * against the now-canonical group).
  *
- * Plan 10-04 extends this same file with the behavioural matrix (duplicate
- * invitees, partial Welcome failure, retry, relay-less delivery,
- * non-durability, fork-tree persistence) — this file stays scoped to the
- * absence/single-write proofs only.
+ * Plan 10-04 extended this file (Tests 7-14 below) with the behavioural
+ * matrix: D-13 duplicate refusal, FOUND-02 refusal through the public API,
+ * D-12 partial Welcome failure, FOUND-04 retry, R-04 non-durability, D-09
+ * relay-less delivery, and fork-tree persistence through a configured
+ * rewind store. Tests 1-6 (plan 10-03) stay scoped to the absence/
+ * single-write proofs and must not be weakened.
  */
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
+import { verifiedSymbol } from "applesauce-core/helpers";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { MarmotClient } from "../marmot-client.js";
 import { GroupFactory } from "../group-factory.js";
+import { GroupsManager } from "../groups-manager.js";
+import {
+  createApplicationMessageIntent,
+  createChatRumor,
+} from "../group/application-message.js";
 import {
   deserializeClientState,
   type SerializedClientState,
@@ -75,9 +95,10 @@ class RecordingKeyValueStore<T> implements GenericKeyValueStore<T> {
   }
 }
 
-describe("Founding group creation via Welcome (FOUND-01, FOUND-03; D-01/D-03/D-08; R-01)", () => {
+describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08/D-09/D-10/D-12/D-13; R-01/R-04/R-05)", () => {
   let mockNetwork: MockNetwork;
   let adminAccount: PrivateKeyAccount<any>;
+  let adminGroupStateStore: InMemoryKeyValueStore<SerializedClientState>;
   let adminClient: MarmotClient;
   let inviteeAccounts: PrivateKeyAccount<any>[];
   let inviteeClients: MarmotClient[];
@@ -85,8 +106,9 @@ describe("Founding group creation via Welcome (FOUND-01, FOUND-03; D-01/D-03/D-0
   beforeEach(() => {
     mockNetwork = new MockNetwork(RELAYS);
     adminAccount = PrivateKeyAccount.generateNew();
+    adminGroupStateStore = new InMemoryKeyValueStore<SerializedClientState>();
     adminClient = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      groupStateStore: adminGroupStateStore,
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: adminAccount.signer,
       network: mockNetwork,
@@ -253,5 +275,265 @@ describe("Founding group creation via Welcome (FOUND-01, FOUND-03; D-01/D-03/D-0
     );
     expect(commitEvents).toHaveLength(0);
     expect(group.state.groupContext.epoch).toBe(0n);
+  });
+
+  // ==========================================================================
+  // Plan 10-04: behavioural matrix — refusals, partial failure, retry,
+  // non-durability, relay-less delivery, fork-tree persistence.
+  // ==========================================================================
+
+  it("Test 7 (D-13): creating with a duplicate invitee KeyPackage is refused before anything is burned", async () => {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+    const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
+
+    // The same published KeyPackage event listed twice as the invitee list.
+    await expect(
+      adminClient.groups.create("Founding Group", {
+        adminPubkeys: [adminPubkey],
+        relays: RELAYS,
+        invitees: [invitee1Event, invitee1Event],
+      }),
+    ).rejects.toThrow();
+
+    // D-13's pre-burn placement is only observable as an absence: the
+    // refusal happened before any Welcome gift wrap or commit event was ever
+    // published.
+    const giftWraps = mockNetwork.events.filter((e) => e.kind === 1059);
+    const commitEvents = mockNetwork.events.filter(
+      (e) => e.kind === GROUP_EVENT_KIND,
+    );
+    expect(giftWraps).toHaveLength(0);
+    expect(commitEvents).toHaveLength(0);
+  });
+
+  it("Test 8 (FOUND-02): creating with a tampered-signature invitee KeyPackage is refused through the public create() API", async () => {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+    const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
+
+    // A legitimately published KeyPackage event, copied with only its `sig`
+    // altered (every other field untouched) — exercises the inherited
+    // SEC-01 signature gate through the public create() API.
+    const tamperedSig =
+      invitee1Event.sig.slice(0, -2) +
+      (invitee1Event.sig.endsWith("00") ? "11" : "00");
+    const tamperedEvent: NostrEvent = {
+      ...invitee1Event,
+      sig: tamperedSig,
+    };
+    // A plain object spread copies own enumerable symbol-keyed properties
+    // too, including nostr-tools' cached `verifiedSymbol` result from
+    // publishing the original event — without clearing it, `verifyEvent`
+    // would return the stale cached `true` instead of re-verifying the
+    // tampered signature.
+    delete (tamperedEvent as Record<PropertyKey, unknown>)[verifiedSymbol];
+
+    await expect(
+      adminClient.groups.create("Founding Group", {
+        adminPubkeys: [adminPubkey],
+        relays: RELAYS,
+        invitees: [tamperedEvent],
+      }),
+    ).rejects.toThrow();
+
+    // A refused founding create leaves no local group: the store holds no
+    // keys at all.
+    expect(await adminGroupStateStore.keys()).toHaveLength(0);
+  });
+
+  /**
+   * Test 9-12 shared setup: founds a two-invitee group **with group relays
+   * supplied** (so the founding Welcome rumor itself is constructible —
+   * `createWelcomeRumor` requires a non-empty `relays` tag; see the
+   * discovered-defect note on Test 13 below) where the second invitee's own
+   * NIP-65 inbox-relay lookup resolves to an empty list (published no inbox
+   * relays of their own), so `deliver` throws "No relays available" for
+   * exactly that recipient while the first invitee succeeds independently.
+   */
+  async function createFoundingWithSecondInviteeUnreachable() {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+    const invitee1Pubkey = await inviteeAccounts[0]!.signer.getPublicKey();
+    const invitee2Pubkey = await inviteeAccounts[1]!.signer.getPublicKey();
+    const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
+    const invitee2Event = await publishKeyPackage(inviteeClients[1]!);
+
+    const reachableLookup =
+      mockNetwork.getUserInboxRelays.bind(mockNetwork);
+    mockNetwork.getUserInboxRelays = async (pubkey: string) => {
+      if (pubkey === invitee2Pubkey) return [];
+      return reachableLookup(pubkey);
+    };
+
+    const group = await adminClient.groups.create("Founding Group", {
+      adminPubkeys: [adminPubkey],
+      relays: RELAYS,
+      invitees: [invitee1Event, invitee2Event],
+    });
+
+    return {
+      adminPubkey,
+      invitee1Pubkey,
+      invitee2Pubkey,
+      group,
+      restoreLookup: () => {
+        mockNetwork.getUserInboxRelays = reachableLookup;
+      },
+    };
+  }
+
+  it("Test 9 (D-12/FOUND-04): a founding create with one undeliverable invitee still resolves at epoch 1 with all members", async () => {
+    const { adminPubkey, invitee1Pubkey, invitee2Pubkey, group } =
+      await createFoundingWithSecondInviteeUnreachable();
+
+    // D-12: canonical state is independent of Welcome delivery outcome —
+    // read membership from the group's own state, not from the delivery
+    // report.
+    expect(group.state.groupContext.epoch).toBe(1n);
+    expect(group.info.members.pubkeys.slice().sort()).toEqual(
+      [adminPubkey, invitee1Pubkey, invitee2Pubkey].sort(),
+    );
+
+    expect(group.welcomeDeliveries).toHaveLength(2);
+    expect(group.pendingWelcomes).toHaveLength(1);
+    expect(group.pendingWelcomes[0]!.recipient.pubkey).toBe(invitee2Pubkey);
+  });
+
+  it("Test 10 (FOUND-04): retryWelcome re-delivers exactly the failed invitee's Welcome and clears it from pendingWelcomes", async () => {
+    const { invitee2Pubkey, group, restoreLookup } =
+      await createFoundingWithSecondInviteeUnreachable();
+    expect(group.pendingWelcomes).toHaveLength(1);
+
+    // The invitee becomes reachable; restore the lookup before retrying.
+    restoreLookup();
+    const giftWrapsBefore = mockNetwork.events.filter(
+      (e) => e.kind === 1059,
+    ).length;
+
+    const outcome = await group.retryWelcome(invitee2Pubkey);
+
+    expect(outcome.kind).toBe("succeeded");
+    expect(group.pendingWelcomes).toHaveLength(0);
+    const giftWrapsAfter = mockNetwork.events.filter(
+      (e) => e.kind === 1059,
+    ).length;
+    expect(giftWrapsAfter - giftWrapsBefore).toBe(1);
+  });
+
+  it("Test 11 (FOUND-04): retryWelcome rejects for a pubkey that was never an invitee, and no-ops on an already-succeeded invitee", async () => {
+    const { invitee1Pubkey, group } =
+      await createFoundingWithSecondInviteeUnreachable();
+
+    // A pubkey that was never an invitee of this founding create.
+    await expect(group.retryWelcome("a".repeat(64))).rejects.toThrow();
+
+    // invitee1 already succeeded during the founding create — retrying it
+    // returns the existing outcome without performing another delivery.
+    const giftWrapsBefore = mockNetwork.events.filter(
+      (e) => e.kind === 1059,
+    ).length;
+    const outcome = await group.retryWelcome(invitee1Pubkey);
+    expect(outcome.kind).toBe("succeeded");
+    const giftWrapsAfter = mockNetwork.events.filter(
+      (e) => e.kind === 1059,
+    ).length;
+    expect(giftWrapsAfter).toBe(giftWrapsBefore);
+  });
+
+  it("Test 12 (R-04): a group reloaded from the store reports no pending Welcomes even though an invitee was never reached", async () => {
+    const { group } = await createFoundingWithSecondInviteeUnreachable();
+    expect(group.pendingWelcomes).toHaveLength(1);
+
+    // A fresh GroupsManager over the SAME store simulates a restart: the
+    // in-memory welcomeDeliveries report never survives, because it was
+    // never persisted (D-04). This is R-04's accepted, documented
+    // silent-loss window — not a bug to fix here. The only recovery is the
+    // spec's re-invite path: the founding creator MAY re-invite the
+    // unreachable member with a fresh KeyPackage against the now-canonical
+    // group (refs/marmot/protocol-core/publish-lifecycle.md lines 66-78).
+    const reloadedManager = new GroupsManager({
+      store: adminGroupStateStore,
+      signer: adminAccount.signer,
+      network: mockNetwork,
+    });
+    const reloaded = await reloadedManager.get(group.idStr);
+
+    expect(reloaded.pendingWelcomes).toHaveLength(0);
+    expect(reloaded.state.groupContext.epoch).toBe(1n);
+    expect(reloaded.info.members.pubkeys).toHaveLength(3);
+  });
+
+  it("Test 13 (D-09/R-05): a relay-less founding create still merges the founding Add at epoch 1, but every Welcome fails and the group cannot carry ordinary group traffic", async () => {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+    const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
+    const invitee2Event = await publishKeyPackage(inviteeClients[1]!);
+
+    // No `relays` option at all. CONTEXT.md's Pinned expectations and
+    // RESEARCH.md's "D-09 footgun, confirmed precisely" analysis both
+    // predicted that the NIP-65 inbox path still works with an empty
+    // group-relay list — but that analysis considered only
+    // `NostrWelcomeDelivery.deliver()`'s relay resolution, not
+    // `createWelcomeRumor()` (src/core/welcome-event.ts), which
+    // *unconditionally* throws "Welcome rumor requires a non-empty relays
+    // tag" before any inbox-relay lookup or publish is even attempted. This
+    // is a genuine discrepancy discovered while writing this test (recorded
+    // in the plan's SUMMARY as a deviation, not silently corrected in the
+    // plan text): a relay-less founding create's Welcome delivery fails for
+    // *every* invitee, not just invitees lacking their own published inbox
+    // relays.
+    const group = await adminClient.groups.create("Founding Group", {
+      adminPubkeys: [adminPubkey],
+      invitees: [invitee1Event, invitee2Event],
+    });
+
+    // D-12 still holds: canonical state reaches epoch 1 with every member,
+    // independent of the (here, total) Welcome delivery failure.
+    expect(group.state.groupContext.epoch).toBe(1n);
+
+    const giftWraps = mockNetwork.events.filter((e) => e.kind === 1059);
+    expect(giftWraps).toHaveLength(0);
+    expect(group.welcomeDeliveries).toHaveLength(2);
+    expect(
+      group.welcomeDeliveries.every((outcome) => outcome.kind === "failed"),
+    ).toBe(true);
+    expect(group.pendingWelcomes).toHaveLength(2);
+
+    // R-05: the resulting group also has no Nostr routing component and can
+    // never carry ordinary group traffic — the engine refuses to build any
+    // outbound group-event envelope at all (`createGroupEvent` requires the
+    // routing component). Use `group.session` directly (the documented
+    // advanced API) to bypass the convergence outbound queue — which would
+    // otherwise hold this application message until the quiescence window
+    // elapses — and observe the immediate refusal.
+    expect(group.relays).toEqual([]);
+    const rumor = createChatRumor({ pubkey: adminPubkey, content: "hello" });
+    await expect(
+      group.session.send(createApplicationMessageIntent(rumor)),
+    ).rejects.toThrow();
+  });
+
+  it("Test 14: a founding create driven through a GroupsManager configured with a rewind store binds the supplied history tree before the single save", async () => {
+    const adminPubkey = await adminAccount.signer.getPublicKey();
+    const invitee1Event = await publishKeyPackage(inviteeClients[0]!);
+    const invitee2Event = await publishKeyPackage(inviteeClients[1]!);
+
+    const rewindStore = new InMemoryKeyValueStore<Uint8Array>();
+    const manager = new GroupsManager({
+      store: new InMemoryKeyValueStore<SerializedClientState>(),
+      rewindStore,
+      signer: adminAccount.signer,
+      network: mockNetwork,
+    });
+
+    // Regression pin for the bound-tree requirement: if the founding
+    // engine's supplied GroupHistoryTree were not bound to the rewind store
+    // before the single save() runs, its history.flush() would throw here.
+    await expect(
+      manager.create("Founding via manager", {
+        adminPubkeys: [adminPubkey],
+        relays: RELAYS,
+        invitees: [invitee1Event, invitee2Event],
+      }),
+    ).resolves.toBeDefined();
+
+    expect((await rewindStore.keys()).length).toBeGreaterThan(0);
   });
 });
