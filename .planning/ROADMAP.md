@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: GroupContext Profile Requirement & Legality-Seam Extension** - `0x8009` required on every group and enforced identically across create, invite, join, inbound, and convergence seams (completed 2026-09-15)
 - [x] **Phase 9: Self-Update / Replacement-Leaf Identity Binding** - Leaf replacement preserves account identity and keeps the proof bound to the new signature key (completed 2026-09-24)
 - [x] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only (gap closure 10-05..10-07 pending, 2026-09-28) (completed 2026-09-28)
-- [ ] **Phase 11: Interop Fixtures, Exports Snapshot & QA Gate** - Exports snapshot and a green six-runtime suite
+- [ ] **Phase 11: Exports Snapshot & QA Gate** - Exports snapshot and a green six-runtime suite
 
 ## Phase Details
 
@@ -204,7 +204,7 @@ Plans:
 - [x] 10-06-PLAN.md — CR-02: `deliverMany()` classifies unacknowledged Welcome publishes as failed via the shared `hasAck`, proven at unit, `MarmotGroup` retry and `GroupRuntime` ordinary-invite levels
 - [x] 10-07-PLAN.md — CR-03: engine `foundingAdd` guard (epoch 0, sole local leaf, no unapplied proposals, non-empty Add-only intent) with a rejection test per branch
 
-### Phase 11: Interop Fixtures, Exports Snapshot & QA Gate
+### Phase 11: Exports Snapshot & QA Gate
 
 **Goal**: The `0x8009` cutover is verified against the full cross-runtime suite, and the public export surface reflects the removed legacy proof exports and
 the added envelope/component exports — the milestone is shippable.
