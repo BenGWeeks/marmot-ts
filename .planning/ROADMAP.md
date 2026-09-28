@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 7: Account Identity Proof Component (0x8009) + Legacy Clean Cut** - Kind-450 proof-class module, KeyPackage/leaf negotiation, and full removal of the legacy `0xf2f1` extension with no fallback (completed 2026-09-14)
 - [x] **Phase 8: GroupContext Profile Requirement & Legality-Seam Extension** - `0x8009` required on every group and enforced identically across create, invite, join, inbound, and convergence seams (completed 2026-09-15)
 - [x] **Phase 9: Self-Update / Replacement-Leaf Identity Binding** - Leaf replacement preserves account identity and keeps the proof bound to the new signature key (completed 2026-09-24)
-- [ ] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only
+- [x] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only (completed 2026-09-28)
 - [ ] **Phase 11: Interop Fixtures, Exports Snapshot & QA Gate** - Rust-signed fixture verification, exports snapshot, and a green six-runtime suite
 
 ## Phase Details
@@ -182,7 +182,7 @@ during planning (`/gsd-plan-phase --research-phase 10`).
 4. Each invitee's Welcome is delivered independently; a failed delivery is retryable per invitee and never rolls back the group.
 5. An invitee who receives their Welcome joins at epoch 1 and can exchange messages with the creator.
 
-**Plans**: 3/4 plans executed
+**Plans**: 4/4 plans complete
 
 Plans:
 **Wave 1**
@@ -196,7 +196,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 10-04-PLAN.md — Behavioural matrix, FOUND-05 end-to-end join-and-message integration test, and downstream docs for the non-durable/relay-less caveats
+- [x] 10-04-PLAN.md — Behavioural matrix, FOUND-05 end-to-end join-and-message integration test, and downstream docs for the non-durable/relay-less caveats
 
 ### Phase 11: Interop Fixtures, Exports Snapshot & QA Gate
 
@@ -235,7 +235,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 7. Account Identity Proof Component (0x8009) + Clean Cut   | v2.0      | 8/8 | Complete    | 2026-09-14 |
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
-| 10. Founding Group Creation via Welcome                    | v2.0      | 3/4 | In Progress|  |
+| 10. Founding Group Creation via Welcome                    | v2.0      | 4/4 | Complete   | 2026-09-28 |
 | 11. Interop Fixtures, Exports Snapshot & QA Gate           | v2.0      | 0/TBD           | Not started | -          |
 
 ## Backlog
