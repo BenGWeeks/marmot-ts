@@ -1,6 +1,10 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { Filter } from "applesauce-core/helpers/filter";
 import type { RelayPool as AsRelayPool } from "applesauce-relay/pool";
+import type {
+  AuthSigner,
+  RelayRequestOptions,
+} from "applesauce-relay/types";
 
 import type {
   NostrNetworkInterface,
@@ -8,10 +12,20 @@ import type {
   Subscribable,
 } from "@internet-privacy/marmot-ts/client";
 
+import { autoAuthenticateRelays } from "./relay-auth.js";
+import type { Unsubscribable } from "./relay-auth.js";
 import type { Directory } from "./discovery.js";
 
 function resolveRelays(relays: string[], fallback: string[]): string[] {
   return relays.length ? relays : fallback;
+}
+
+export interface RelayPoolOptions {
+  /**
+   * When set, relays that refuse a REQ/EVENT with `auth-required` are
+   * answered with a NIP-42 AUTH signed by this signer (see relay-auth.ts).
+   */
+  authSigner?: AuthSigner;
 }
 
 /**
@@ -19,6 +33,8 @@ function resolveRelays(relays: string[], fallback: string[]): string[] {
  * marmot-ts's {@link NostrNetworkInterface} for the TUI demo. The pool is shared
  * with the {@link Directory} so relay-list/profile discovery reuses the same
  * connections, and `getUserInboxRelays` delegates to the Directory's loader.
+ * When constructed with an `authSigner` it also answers NIP-42 AUTH challenges
+ * for relays that demand auth (see relay-auth.ts).
  */
 export class RelayPool implements NostrNetworkInterface {
   /** Relays used when a call passes an empty relay list. Mutable: startup may
@@ -27,16 +43,21 @@ export class RelayPool implements NostrNetworkInterface {
 
   readonly #pool: AsRelayPool;
   readonly #directory: Directory;
+  #relayAuth?: Unsubscribable;
   #closed = false;
 
   constructor(
     pool: AsRelayPool,
     defaultRelays: string[],
     directory: Directory,
+    options: RelayPoolOptions = {},
   ) {
     this.#pool = pool;
     this.defaultRelays = defaultRelays;
     this.#directory = directory;
+    if (options.authSigner) {
+      this.#relayAuth = autoAuthenticateRelays(this.#pool, options.authSigner);
+    }
   }
 
   async publish(
@@ -56,12 +77,20 @@ export class RelayPool implements NostrNetworkInterface {
   async request(
     relays: string[],
     filters: Filter | Filter[],
+    /**
+     * Set `waitForAuth: false` for public lookups so a connection flagged
+     * auth-required by an unrelated REQ cannot hold this REQ. applesauce's
+     * default group completion (5s after the first relay EOSE, or all
+     * relays EOSE/ERROR) already keeps one stuck relay from blocking
+     * results from the others.
+     */
+    options?: Pick<RelayRequestOptions, "waitForAuth">,
   ): Promise<NostrEvent[]> {
     if (this.#closed) return [];
     const targets = resolveRelays(relays, this.defaultRelays);
     const collected: NostrEvent[] = [];
     await new Promise<void>((resolve, reject) => {
-      this.#pool.request(targets, filters).subscribe({
+      this.#pool.request(targets, filters, options).subscribe({
         next: (event) => collected.push(event),
         error: reject,
         complete: () => resolve(),
@@ -102,6 +131,8 @@ export class RelayPool implements NostrNetworkInterface {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#relayAuth?.unsubscribe();
+    this.#relayAuth = undefined;
     this.#directory.close();
     this.#pool.close();
   }

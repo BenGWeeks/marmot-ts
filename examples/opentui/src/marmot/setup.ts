@@ -264,7 +264,12 @@ export async function createController(
   });
 
   const directory = new Directory(eventStore);
-  const pool = new RelayPool(nostr, bootstrapRelays, directory);
+  // Relays that refuse a REQ/EVENT with auth-required get a NIP-42 AUTH
+  // signed by the account (relay.ditto.pub gates the kind-1059 inbox this
+  // way). Teardown happens inside RelayPool.close().
+  const pool = new RelayPool(nostr, bootstrapRelays, directory, {
+    authSigner: account.signer,
+  });
 
   // One shared message store holds every group's rumor history. Each group's
   // backend is scoped to a `${groupHex}:` keyspace so groups never read or
