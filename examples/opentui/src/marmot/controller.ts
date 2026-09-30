@@ -53,7 +53,7 @@ import { basename, join } from "node:path";
 
 import { downloadEncryptedBlob, uploadEncryptedBlob } from "./blossom.js";
 import { guessMediaType } from "./mime.js";
-import type { Directory } from "../helpers/discovery.js";
+import { LOOKUP_RELAYS, type Directory } from "../helpers/discovery.js";
 import type { RelayPool } from "../helpers/relay-pool.js";
 import {
   groupIsAdmin,
@@ -62,6 +62,12 @@ import {
   npubShort,
   short,
 } from "./format.js";
+import {
+  deriveRelayListStatus,
+  describeRelayListGap,
+  relayListsComplete,
+  type RelayListStatus,
+} from "./relay-lists.js";
 
 /** Kind of the chat rumors {@link createChatRumor} produces (Marmot chat message). */
 const CHAT_MESSAGE_KIND = 9;
@@ -495,6 +501,14 @@ export interface ChatSnapshot {
   outboxRelays: string[];
   /** The account's advertised inbox relays for welcomes (kind 10050). */
   inboxRelays: string[];
+  /** Discovery state of the account's 10002/10050 relay lists. */
+  relayListStatus: RelayListStatus;
+  /**
+   * Increments each time the controller needs the user to set up relay
+   * lists; the UI opens the relay editor when this increases. 0 means it has
+   * never been requested.
+   */
+  relaySetupRequest: number;
   keyPackages: KeyPackageSummary;
   clientId: string;
   activeGroupId: string | null;
@@ -591,11 +605,18 @@ export class MarmotController {
   #busy = false;
   #statusSeq = 0;
 
-  /** True once a returning account's advertised relay lists have been loaded. */
-  #relayListsLoaded = false;
+  /** True once a discovery pass has settled (successfully or not) at least once. */
+  #relayListsAttempted = false;
+  /**
+   * True once the user has saved relay lists this session (R2/R3) — a stale
+   * background discovery pass must not overwrite them afterwards.
+   */
+  #relayListsAuthoritative = false;
   /** In-flight {@link #loadRelayLists}, so the background load and an on-demand
    * publish share one discovery pass instead of racing two. */
   #relayListsPromise?: Promise<void>;
+  /** Counter mirrored onto {@link ChatSnapshot.relaySetupRequest}. */
+  #relaySetupRequest = 0;
 
   #watchAbort = false;
   /** Library-owned inbound transport: group subscriptions (connectAll). */
@@ -760,11 +781,13 @@ export class MarmotController {
     this.#publish();
   }
 
-  async createGroup(name: string, relays = this.#outboxRelays): Promise<void> {
+  async createGroup(name: string, relays: string[]): Promise<void> {
     await this.#withBusy(async () => {
       const groupRelays = normalizeRelays(relays);
       if (!groupRelays.length)
-        throw new Error("group needs at least one relay");
+        throw new Error(
+          "group needs at least one relay — enter relays manually, or press r to set up your relay lists",
+        );
       const group = await this.#client.groups.create(name, {
         relays: groupRelays,
       });
@@ -1262,7 +1285,8 @@ export class MarmotController {
 
   async publishKeyPackage(): Promise<void> {
     await this.#withBusy(async () => {
-      const relays = await this.#requirePublishRelays();
+      const relays = await this.#requireKeyPackageRelays();
+      if (!relays) return;
       const kp = await this.#client.keyPackages.create({ relays });
       await this.#refreshKeyPackageSummary();
       this.log(
@@ -1279,7 +1303,8 @@ export class MarmotController {
         list.find((p) => !p.used) ??
         list[0];
       if (!current) throw new Error("no KeyPackage to rotate");
-      const relays = await this.#requirePublishRelays();
+      const relays = await this.#requireKeyPackageRelays();
+      if (!relays) return;
       const rotated = await this.#client.keyPackages.rotate(
         current.keyPackageRef,
         { relays },
@@ -1319,7 +1344,7 @@ export class MarmotController {
       this.#outboxRelays = nextOutbox;
       // These lists are now authoritative — a returning account that had not yet
       // discovered its relays must not overwrite them with a later background load.
-      this.#relayListsLoaded = true;
+      this.#relayListsAuthoritative = true;
       const inboxChanged =
         relaySet(nextInbox).join(",") !== relaySet(this.#inboxRelays).join(",");
       this.#inboxRelays = nextInbox;
@@ -1329,6 +1354,10 @@ export class MarmotController {
       this.log(
         `published relay lists — outbox: ${nextOutbox.join(", ")} · inbox: ${nextInbox.join(", ")}`,
       );
+      // Both lists are now known — publish a fresh KeyPackage to the newly
+      // saved outbox if we don't already have an unused one (R3). Idempotent;
+      // does not use #withBusy, so this is safe to call from inside one.
+      await this.#ensureKeyPackage();
     });
   }
 
@@ -1365,6 +1394,21 @@ export class MarmotController {
     });
   }
 
+  /**
+   * Re-attempt relay-list discovery in the background (R2) — fired by the
+   * new-group prompt when the outbox is still empty, so its choices can
+   * update once discovery resolves. Unlike the action methods above, this
+   * does not use {@link #withBusy}: it's a best-effort background retry, not
+   * a user-initiated action the UI should block on.
+   */
+  async refreshRelayLists(): Promise<void> {
+    try {
+      await this.#ensureRelayListsLoaded();
+    } catch (err) {
+      if (!this.#watchAbort) this.logError(err);
+    }
+  }
+
   /** Public logging hook so the UI can surface command errors uniformly. */
   log(text: string, level: StatusLine["level"] = "info"): void {
     const line = { id: this.#statusSeq++, level, text, at: Date.now() };
@@ -1394,33 +1438,35 @@ export class MarmotController {
   }
 
   /**
-   * Discover and adopt the account's advertised relay lists exactly once,
-   * memoising the in-flight pass so the background load and an on-demand publish
-   * (e.g. {@link #ensureKeyPackage}, {@link #requirePublishRelays}) share one
-   * discovery rather than racing two.
+   * Discover the account's advertised relay lists, memoised only while both
+   * are known (R2) — an empty or partial result is never treated as final, so
+   * the next caller that needs relays (KeyPackage publish/rotate, the startup
+   * KeyPackage path, profile save, the new-group prompt) runs discovery again.
+   * The background load and any on-demand caller (e.g.
+   * {@link #requireKeyPackageRelays}, {@link #requirePublishRelays}) share one
+   * in-flight pass rather than racing two.
    */
   async #ensureRelayListsLoaded(): Promise<void> {
-    if (this.#relayListsLoaded) return;
+    if (relayListsComplete(this.#outboxRelays, this.#inboxRelays)) return;
     if (!this.#relayListsPromise) {
-      this.#relayListsPromise = this.#loadRelayLists().then(
-        () => {
-          this.#relayListsLoaded = true;
-        },
-        (err) => {
-          // Allow a later call to retry after a failed discovery.
-          this.#relayListsPromise = undefined;
-          throw err;
-        },
-      );
+      // Publish immediately so the snapshot reflects "loading" for the
+      // duration of this pass, even before it settles.
+      this.#relayListsPromise = this.#loadRelayLists().finally(() => {
+        this.#relayListsPromise = undefined;
+        this.#relayListsAttempted = true;
+        this.#publish();
+      });
+      this.#publish();
     }
     await this.#relayListsPromise;
   }
 
   /**
-   * The user's own write relays (NIP-65 outbox) — where their KeyPackages,
-   * profile, and relay lists are published. Discovers a returning account's
-   * advertised relays first, then refuses to publish at all when none are known
-   * rather than silently falling back to the bootstrap defaults the user never
+   * The user's own write relays (NIP-65 outbox) — where their profile is
+   * published. Discovers a returning account's advertised relays first (R2:
+   * an incomplete prior pass is never memoised, so this re-attempts discovery
+   * automatically), then refuses to publish at all when none are known rather
+   * than silently falling back to the bootstrap defaults the user never
    * configured.
    */
   async #requirePublishRelays(): Promise<string[]> {
@@ -1434,13 +1480,65 @@ export class MarmotController {
     return relays;
   }
 
-  /** Load advertised relay lists in the background and adopt them if present. */
-  async #loadRelayLists(): Promise<void> {
-    const [outbox, inbox] = await Promise.all([
-      this.#directory.outboxes(this.#pubkey, this.#relays),
-      this.#directory.welcomeInboxes(this.#pubkey, this.#relays),
-    ]);
+  /**
+   * Signal the UI that the user needs to set up their relay lists (R3): logs
+   * `reason` as a warning, increments {@link #relaySetupRequest} so
+   * `App.tsx` opens the relay editor once no other modal is in the way, and
+   * republishes the snapshot. A no-op while shutting down.
+   */
+  #requestRelaySetup(reason: string): void {
     if (this.#watchAbort) return;
+    this.log(`${reason} — opening the relay editor`, "warn");
+    this.#relaySetupRequest++;
+    this.#publish();
+  }
+
+  /**
+   * Resolves the relays a KeyPackage should be published to, requiring both
+   * the 10002 outbox and 10050 inbox lists to be known first (R3) — a missing
+   * inbox list means a Welcome sent to this KeyPackage could never reach the
+   * account. Returns null (after requesting relay setup) when either list is
+   * still missing, so callers route the user into the relay editor instead of
+   * publishing to bootstrap relays or throwing an opaque error.
+   */
+  async #requireKeyPackageRelays(): Promise<string[] | null> {
+    await this.#ensureRelayListsLoaded();
+    if (this.#watchAbort) return null;
+    if (!relayListsComplete(this.#outboxRelays, this.#inboxRelays)) {
+      const status = deriveRelayListStatus({
+        outbox: this.#outboxRelays,
+        inbox: this.#inboxRelays,
+        inFlight: false,
+        attempted: true,
+      });
+      const gap = describeRelayListGap(status) ?? "relay lists are incomplete";
+      this.#requestRelaySetup(
+        `${gap} — set up your relay lists before publishing a KeyPackage`,
+      );
+      return null;
+    }
+    return relaySet(this.#outboxRelays);
+  }
+
+  /**
+   * Discover advertised relay lists and adopt them if present. Queries
+   * {@link LOOKUP_RELAYS} alongside the bootstrap relays as hints — the
+   * applesauce address loader queries pointer hints before its
+   * extras→lookup fallback chain, so an account whose lists live only on a
+   * well-known indexer (whitenoise, purplepag.es, …) resolves inside
+   * {@link Directory}'s 10s `$first` window instead of falling through to
+   * bootstrap relays that may be dead or flapping.
+   */
+  async #loadRelayLists(): Promise<void> {
+    this.log("looking up your relay lists (kind 10002 / 10050)…");
+    const hints = relaySet(this.#relays, LOOKUP_RELAYS);
+    const [outbox, inbox] = await Promise.all([
+      this.#directory.outboxes(this.#pubkey, hints),
+      this.#directory.welcomeInboxes(this.#pubkey, hints),
+    ]);
+    // A saved list is authoritative for this session — never overwrite it
+    // with a (possibly stale) discovery result that was already in flight.
+    if (this.#watchAbort || this.#relayListsAuthoritative) return;
 
     if (outbox.length) {
       this.#outboxRelays = outbox;
@@ -1463,6 +1561,17 @@ export class MarmotController {
       );
       this.#relistenInvites();
     }
+    // Surface a found-outbox/missing-10050 (or missing-outbox) state (R3) —
+    // this pass has settled, so evaluate the gap against the adopted fields.
+    const gap = describeRelayListGap(
+      deriveRelayListStatus({
+        outbox: this.#outboxRelays,
+        inbox: this.#inboxRelays,
+        inFlight: false,
+        attempted: true,
+      }),
+    );
+    if (gap) this.log(`${gap} — press r to set up your relay lists`, "warn");
     this.#publish();
   }
 
@@ -1498,19 +1607,11 @@ export class MarmotController {
       return;
     }
     // We have no unused KeyPackage to offer, so publish a fresh one — to the
-    // user's OWN outbox relays. Discover them first (returning accounts) so this
-    // never lands on the bootstrap defaults; if the account has no advertised
-    // relays at all, skip rather than publish somewhere the user doesn't know.
-    await this.#ensureRelayListsLoaded();
-    if (this.#watchAbort) return;
-    const relays = relaySet(this.#outboxRelays);
-    if (!relays.length) {
-      this.log(
-        "no outbox relays found — skipping KeyPackage publish; press r to set your relays so others can invite you",
-        "warn",
-      );
-      return;
-    }
+    // user's OWN outbox relays, and only once both relay lists are known
+    // (R3); #requireKeyPackageRelays has already logged + signalled setup
+    // when they aren't.
+    const relays = await this.#requireKeyPackageRelays();
+    if (this.#watchAbort || !relays) return;
     await this.#client.keyPackages.create({ relays });
     if (this.#watchAbort) return;
     await this.#refreshKeyPackageSummary();
@@ -1996,6 +2097,13 @@ export class MarmotController {
       connectedRelayCount: this.#pool.relayCount,
       outboxRelays: this.#outboxRelays,
       inboxRelays: this.#inboxRelays,
+      relayListStatus: deriveRelayListStatus({
+        outbox: this.#outboxRelays,
+        inbox: this.#inboxRelays,
+        inFlight: this.#relayListsPromise !== undefined,
+        attempted: this.#relayListsAttempted,
+      }),
+      relaySetupRequest: this.#relaySetupRequest,
       keyPackages: this.#keyPackages,
       clientId: this.#clientId,
       activeGroupId: this.#activeId,
