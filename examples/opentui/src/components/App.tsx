@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { useController } from "../hooks/use-marmot.js";
+import { useChat, useController } from "../hooks/use-marmot.js";
 import { useAppKeybindings } from "../hooks/use-app-keybindings.js";
 import { NavigationProvider, useNavigation } from "../hooks/use-navigation.js";
 import { ChatView } from "./ChatView.js";
@@ -21,6 +21,7 @@ export function App(props: { onQuit: () => void }) {
 
 function AppContent(props: { onQuit: () => void }) {
   const controller = useController();
+  const { relaySetupRequest } = useChat();
   const nav = useNavigation();
   const started = useRef(false);
   const [modal, setModal] = useState<Modal>(null);
@@ -30,6 +31,24 @@ function AppContent(props: { onQuit: () => void }) {
     started.current = true;
     controller.start().catch((err) => controller.logError(err));
   }, [controller]);
+
+  // Handshake with MarmotController#relaySetupRequest: the controller
+  // increments this counter whenever it needs the user to set up relay lists
+  // (R3). We track the last value we've acted on in a ref; when the counter
+  // moves past it and no other modal is open, open the relay editor in setup
+  // mode. If another modal is open, the request stays pending (the ref isn't
+  // advanced) until that modal closes, so an in-progress form is never
+  // clobbered.
+  const handledRelaySetupRequest = useRef(0);
+  useEffect(() => {
+    if (
+      relaySetupRequest > handledRelaySetupRequest.current &&
+      modal === null
+    ) {
+      handledRelaySetupRequest.current = relaySetupRequest;
+      setModal({ kind: "relays", setup: true });
+    }
+  }, [relaySetupRequest, modal]);
 
   useAppKeybindings({ modal, setModal, onQuit: props.onQuit });
 

@@ -3,6 +3,7 @@ import { useNavigation } from "../hooks/use-navigation.js";
 import { useProfile } from "../hooks/use-profile.js";
 import type { InviteCandidates } from "../marmot/controller.js";
 import { parseRelays } from "../marmot/format.js";
+import { groupRelayChoices } from "../marmot/relay-lists.js";
 import { ChoicePrompt } from "./ChoicePrompt.js";
 import { GroupDebugModal } from "./GroupDebugModal.js";
 import { GroupInfoModal } from "./GroupInfoModal.js";
@@ -30,7 +31,7 @@ export type Modal =
   | { kind: "groupinfo"; groupId: string }
   | { kind: "members"; groupId: string }
   | { kind: "profile" }
-  | { kind: "relays" }
+  | { kind: "relays"; setup?: boolean }
   | { kind: "attach" }
   | { kind: "myqr" }
   | { kind: "help" }
@@ -48,7 +49,8 @@ export function ModalHost(props: {
 }) {
   const { modal, setModal } = props;
   const controller = useController();
-  const { me, outboxRelays, inboxRelays, keyPackages } = useChat();
+  const { me, outboxRelays, inboxRelays, relayListStatus, keyPackages } =
+    useChat();
   const nav = useNavigation();
   const myProfile = useProfile(me.pubkey);
 
@@ -84,36 +86,45 @@ export function ModalHost(props: {
           placeholder="group name"
           onSubmit={(value) => {
             const name = value.trim();
+            if (name && outboxRelays.length === 0) {
+              // Re-attempt discovery (R2) so the prompt can re-render with the
+              // outbox choice once lists arrive.
+              void controller.refreshRelayLists();
+            }
             setModal(name ? { kind: "new-relays", name } : null);
           }}
           onCancel={() => setModal(null)}
         />
       );
-    case "new-relays":
+    case "new-relays": {
+      const choices = groupRelayChoices(outboxRelays, relayListStatus);
       return (
         <ChoicePrompt
           title="group relays"
-          options={[
-            {
-              name: "Use default outbox relays",
-              description: outboxRelays.join(", ") || "none loaded",
-            },
-            {
-              name: "Enter relays manually",
-              description: "space or comma separated relay URLs/domains",
-            },
-          ]}
+          options={choices.map(({ name, description }) => ({
+            name,
+            description,
+          }))}
           onSelect={(index) => {
-            if (index === 0) {
-              setModal(null);
-              void controller.createGroup(modal.name, outboxRelays);
-            } else {
-              setModal({ kind: "new-manual-relays", name: modal.name });
+            const choice = choices[index];
+            if (!choice) return;
+            switch (choice.kind) {
+              case "outbox":
+                setModal(null);
+                void controller.createGroup(modal.name, outboxRelays);
+                break;
+              case "manual":
+                setModal({ kind: "new-manual-relays", name: modal.name });
+                break;
+              case "setup":
+                setModal({ kind: "relays", setup: true });
+                break;
             }
           }}
           onCancel={() => setModal(null)}
         />
       );
+    }
     case "new-manual-relays":
       return (
         <TextPrompt
@@ -249,6 +260,7 @@ export function ModalHost(props: {
     case "relays":
       return (
         <RelaysModal
+          title={modal.setup ? "set up your relay lists" : undefined}
           outbox={outboxRelays}
           inbox={inboxRelays}
           onSave={(outbox, inbox) => {

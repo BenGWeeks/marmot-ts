@@ -13,10 +13,7 @@
  * `"missing-inbox"` mean a discovery pass settled but one list came back empty.
  */
 export type RelayListStatus =
-  | "loading"
-  | "missing-outbox"
-  | "missing-inbox"
-  | "ready";
+  "loading" | "missing-outbox" | "missing-inbox" | "ready";
 
 /** True only when both the outbox and inbox relay lists are non-empty. */
 export function relayListsComplete(outbox: string[], inbox: string[]): boolean {
