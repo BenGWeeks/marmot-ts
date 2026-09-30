@@ -827,13 +827,17 @@ export class MarmotController {
       }
 
       // Discover the invitee's NIP-65 (kind 10002) outbox relays — where they
-      // publish their KeyPackages. The Directory's address loader also falls
-      // back to public NIP-65 indexers, so this works even for peers we've
-      // never shared a relay with.
+      // publish their KeyPackages. Hints include LOOKUP_RELAYS alongside the
+      // NIP-05/session relays (mirroring #loadRelayLists): the applesauce
+      // address loader queries pointer hints before its extras→lookup
+      // fallback chain, so hinting the well-known indexers lets an invitee
+      // whose relay list lives only there resolve inside Directory's 10s
+      // window instead of timing out and falling back to NIP-05/session
+      // relays.
       this.log(`discovering KeyPackages for ${npubShort(pubkeyHex)}…`);
       const discovered = await this.#directory.outboxes(
         pubkeyHex,
-        relaySet(nip05Relays, this.#relays),
+        relaySet(nip05Relays, this.#relays, LOOKUP_RELAYS),
       );
       this.log(
         discovered.length
@@ -842,10 +846,19 @@ export class MarmotController {
       );
       const searchRelays = relaySet(nip05Relays, discovered, this.#relays);
       this.log(`fetching KeyPackages from ${searchRelays.join(", ")}`);
-      const kps = await this.#pool.request(searchRelays, {
-        kinds: [ADDRESSABLE_KEY_PACKAGE_KIND],
-        authors: [pubkeyHex],
-      });
+      // KeyPackages are public, so this lookup does not wait on auth: a relay
+      // whose connection was flagged auth-required by another REQ (e.g.
+      // ditto gating our kind-1059 inbox) would otherwise hold this REQ
+      // until auth succeeds. applesauce's group completion keeps any one
+      // stuck relay from blocking results from the others.
+      const kps = await this.#pool.request(
+        searchRelays,
+        {
+          kinds: [ADDRESSABLE_KEY_PACKAGE_KIND],
+          authors: [pubkeyHex],
+        },
+        { waitForAuth: false },
+      );
       if (!kps.length) {
         throw new Error(`no KeyPackage found for ${npubShort(pubkeyHex)}`);
       }
