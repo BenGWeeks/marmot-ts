@@ -218,6 +218,15 @@ background so your edits survive restarts without blocking startup. Pressing
 Enter in the Relays modal re-signs and republishes both lists; the values are
 normalised, de-duplicated, and stripped of invalid URLs before publishing.
 
+If discovery finds no lists (or only the outbox list), the app does not treat
+that as final — it retries the next time you create a group, or publish or
+rotate a KeyPackage. Publishing or rotating a KeyPackage requires both lists
+to be known, and opens the Relays editor automatically when either is
+missing. The new-group prompt offers "Use my outbox relays" only once the
+outbox list is known; otherwise it offers manual entry or relay setup instead
+of a silent empty default. Saving your lists publishes a fresh KeyPackage if
+you don't have one yet.
+
 A two-party session: copy each peer's npub from the header (or click it to show
 a scannable QR code), press **n** in the groups panel and name a group, press
 **i** and paste the other's npub. The app fetches that peer's published

@@ -24,6 +24,8 @@ const FIELDS: readonly FormField<"outbox" | "inbox">[] = [
  * component only has to split the text.
  */
 export function RelaysModal(props: {
+  /** Overrides the default title, e.g. when opened via a relay-setup request. */
+  title?: string;
   outbox: string[];
   inbox: string[];
   onSave: (outbox: string[], inbox: string[]) => void;
@@ -31,7 +33,7 @@ export function RelaysModal(props: {
 }) {
   return (
     <FormModal<"outbox" | "inbox">
-      title="edit relay lists"
+      title={props.title ?? "edit relay lists"}
       width={74}
       fields={FIELDS}
       initialValues={{
