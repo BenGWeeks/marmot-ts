@@ -78,7 +78,9 @@ interface FakeRelay extends AuthWatchableRelay {
   challenge$: FakeState<string | null>;
   authRequiredForRead$: FakeState<boolean>;
   authRequiredForPublish$: FakeState<boolean>;
-  authenticate: ReturnType<typeof mock<(signer: AuthSigner) => Promise<PublishResponse>>>;
+  authenticate: ReturnType<
+    typeof mock<(signer: AuthSigner) => Promise<PublishResponse>>
+  >;
 }
 
 function createFakeRelay(url: string): FakeRelay {
@@ -87,7 +89,9 @@ function createFakeRelay(url: string): FakeRelay {
     challenge$: new FakeState<string | null>(null),
     authRequiredForRead$: new FakeState<boolean>(false),
     authRequiredForPublish$: new FakeState<boolean>(false),
-    authenticate: mock(async () => ({ ok: true, from: url }) as PublishResponse),
+    authenticate: mock(
+      async () => ({ ok: true, from: url }) as PublishResponse,
+    ),
   };
 }
 
@@ -236,7 +240,12 @@ describe("autoAuthenticateRelays", () => {
     });
     const refused = createFakeRelay("wss://refused.example/");
     refused.authenticate = mock(
-      async () => ({ ok: false, message: "auth-required: nope", from: refused.url }) as PublishResponse,
+      async () =>
+        ({
+          ok: false,
+          message: "auth-required: nope",
+          from: refused.url,
+        }) as PublishResponse,
     );
 
     const pool = createFakePool([rejecting, throwing, refused]);

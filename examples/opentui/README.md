@@ -99,6 +99,18 @@ account's own **published** relay lists — its NIP-65 outbox (kind 10002) and
 welcome inbox (kind 10050). Set them when creating an account (profile panel →
 **o**) or edit them in-app (**r** → relays).
 
+### Relay authentication (NIP-42)
+
+The app answers a relay's AUTH challenge with a `kind:22242` event signed by
+your account key, but only after that relay refuses a request or publish with
+`auth-required` (e.g. `wss://relay.ditto.pub` for gift-wrapped welcomes) —
+never on a bare challenge. The trade-off: authenticating reveals your pubkey
+to that relay, while relays that never demand auth never receive a signed
+AUTH. Invite KeyPackage lookups don't wait on auth, since KeyPackages are
+public and an unrelated auth-gated connection shouldn't withhold them. This is
+example-level behavior; finer-grained control is expected from
+`applesauce-relay` itself in a future release.
+
 > Many public relays reject MLS event kinds (443/30443/444/445/1059). For
 > reliable testing, run a permissive local relay (e.g. `strfry`,
 > `nostr-rs-relay`) and point your account's relay lists at

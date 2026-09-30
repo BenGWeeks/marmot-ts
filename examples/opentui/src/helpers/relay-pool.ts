@@ -1,10 +1,7 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { Filter } from "applesauce-core/helpers/filter";
 import type { RelayPool as AsRelayPool } from "applesauce-relay/pool";
-import type {
-  AuthSigner,
-  RelayRequestOptions,
-} from "applesauce-relay/types";
+import type { AuthSigner, RelayRequestOptions } from "applesauce-relay/types";
 
 import type {
   NostrNetworkInterface,
