@@ -17,9 +17,11 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { createCredential } from "../credential.js";
+import { defaultCapabilities } from "../default-capabilities.js";
 import { evaluateKeyPackageForGroup } from "../key-package-eligibility.js";
 import { generateKeyPackage } from "../key-package.js";
 import {
+  checkKeyPackageProposalsTag,
   createDeleteKeyPackageEvent,
   createKeyPackageEvent,
   getKeyPackage,
@@ -318,6 +320,104 @@ describe("createKeyPackageEvent", () => {
     expect(extensionsTag).not.toContain(
       `0x${greaseValues[0].toString(16).padStart(4, "0")}`,
     );
+  });
+
+  it("keeps GREASE proposal ids in the mls_proposals tag, in leaf order (MDK exact-match parity)", async () => {
+    const credential = createCredential(validPubkey);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const keyPackage = await generateKeyPackage({
+      credential,
+      ciphersuiteImpl,
+      signer: VALID_ACCOUNT.signer,
+      capabilities: { ...defaultCapabilities(), proposals: [0x4a4a, 0xeaea] },
+    });
+    expect(keyPackage.publicPackage.leafNode.capabilities.proposals).toEqual([
+      0x4a4a, 0xeaea, 0x0008, 0x000a,
+    ]);
+
+    const event = await createKeyPackageEvent({
+      keyPackage: keyPackage.publicPackage,
+      identifier: testD,
+    });
+
+    expect(event.tags.find((t) => t[0] === "mls_proposals")).toEqual([
+      "mls_proposals",
+      "0x4a4a",
+      "0xeaea",
+      "0x0008",
+      "0x000a",
+    ]);
+  });
+
+  it("deduplicates mls_proposals values, keeping the first occurrence", async () => {
+    const credential = createCredential(validPubkey);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const keyPackage = await generateKeyPackage({
+      credential,
+      ciphersuiteImpl,
+      signer: VALID_ACCOUNT.signer,
+    });
+    const leafNode = keyPackage.publicPackage.leafNode;
+    const tampered = {
+      ...keyPackage.publicPackage,
+      leafNode: {
+        ...leafNode,
+        capabilities: {
+          ...leafNode.capabilities,
+          proposals: [0x0008, 0x4a4a, 0x0008],
+        },
+      },
+    };
+
+    const event = await createKeyPackageEvent({
+      keyPackage: tampered,
+      identifier: testD,
+    });
+
+    expect(event.tags.find((t) => t[0] === "mls_proposals")).toEqual([
+      "mls_proposals",
+      "0x0008",
+      "0x4a4a",
+    ]);
+  });
+
+  it("still filters GREASE ids advertised in leaf capabilities.extensions from mls_extensions", async () => {
+    const credential = createCredential(validPubkey);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const keyPackage = await generateKeyPackage({
+      credential,
+      ciphersuiteImpl,
+      signer: VALID_ACCOUNT.signer,
+    });
+    const leafNode = keyPackage.publicPackage.leafNode;
+    const tampered = {
+      ...keyPackage.publicPackage,
+      leafNode: {
+        ...leafNode,
+        capabilities: {
+          ...leafNode.capabilities,
+          extensions: [...leafNode.capabilities.extensions, 0x5a5a],
+        },
+      },
+    };
+
+    const event = await createKeyPackageEvent({
+      keyPackage: tampered,
+      identifier: testD,
+    });
+
+    const extensionsTag = event.tags.find((t) => t[0] === "mls_extensions");
+    expect(extensionsTag).toBeDefined();
+    expect(extensionsTag).not.toContain("0x5a5a");
   });
 
   it("should be able to decode base64-encoded key package event", async () => {
@@ -694,6 +794,126 @@ describe("spec compliance (transports/nostr.md, foundation/key-packages.md)", ()
   });
 });
 
+describe("checkKeyPackageProposalsTag", () => {
+  const VALID_ACCOUNT = testAccount(5);
+  const validPubkey = VALID_ACCOUNT.pubkey;
+  const testD =
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+  /** Builds a KeyPackage + event template with a deterministic proposal list. */
+  async function build(proposals: number[]) {
+    const credential = createCredential(validPubkey);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const keyPackage = await generateKeyPackage({
+      credential,
+      ciphersuiteImpl,
+      signer: VALID_ACCOUNT.signer,
+      capabilities: { ...defaultCapabilities(), proposals },
+    });
+    const template = await createKeyPackageEvent({
+      keyPackage: keyPackage.publicPackage,
+      identifier: testD,
+    });
+    return { keyPackage: keyPackage.publicPackage, template };
+  }
+
+  /** Replaces every mls_proposals tag with the given tags (none = removed). */
+  function withProposalTags(tags: string[][], replacement: string[][]) {
+    return {
+      tags: [...tags.filter((t) => t[0] !== "mls_proposals"), ...replacement],
+    };
+  }
+
+  it("returns exact for the encoder's own tag (GREASE included)", async () => {
+    const { keyPackage, template } = await build([0x4a4a, 0xeaea]);
+    expect(checkKeyPackageProposalsTag(template, keyPackage)).toEqual({
+      kind: "match",
+      mode: "exact",
+    });
+  });
+
+  it("returns exact regardless of value order", async () => {
+    const { keyPackage, template } = await build([0x4a4a, 0xeaea]);
+    const event = withProposalTags(template.tags, [
+      ["mls_proposals", "0x000a", "0x0008", "0xeaea", "0x4a4a"],
+    ]);
+    expect(checkKeyPackageProposalsTag(event, keyPackage)).toEqual({
+      kind: "match",
+      mode: "exact",
+    });
+  });
+
+  it("returns grease-stripped for the legacy GREASE-filtered tag", async () => {
+    const { keyPackage, template } = await build([0x4a4a, 0xeaea]);
+    const event = withProposalTags(template.tags, [
+      ["mls_proposals", "0x0008", "0x000a"],
+    ]);
+    expect(checkKeyPackageProposalsTag(event, keyPackage)).toEqual({
+      kind: "match",
+      mode: "grease-stripped",
+    });
+  });
+
+  it.each([
+    ["missing a real proposal (GREASE kept)", ["0x4a4a", "0xeaea", "0x0008"]],
+    ["missing a real proposal (GREASE stripped)", ["0x0008"]],
+    [
+      "an extra real proposal (GREASE kept)",
+      ["0x4a4a", "0xeaea", "0x0008", "0x000a", "0x0003"],
+    ],
+    [
+      "an extra real proposal (GREASE stripped)",
+      ["0x0008", "0x000a", "0x0003"],
+    ],
+    ["a non-canonical uppercase spelling", ["0x0008", "0x000A"]],
+  ])("returns mismatch for %s", async (_name, values) => {
+    const { keyPackage, template } = await build([0x4a4a, 0xeaea]);
+    const event = withProposalTags(template.tags, [
+      ["mls_proposals", ...values],
+    ]);
+    expect(checkKeyPackageProposalsTag(event, keyPackage)).toEqual({
+      kind: "mismatch",
+    });
+  });
+
+  it.each([
+    ["a duplicate value", [["mls_proposals", "0x0008", "0x0008", "0x000a"]]],
+    ["an absent tag", []],
+    [
+      "a repeated tag",
+      [
+        ["mls_proposals", "0x0008", "0x000a"],
+        ["mls_proposals", "0x0008", "0x000a"],
+      ],
+    ],
+    ["an empty tag", [["mls_proposals"]]],
+  ])("returns malformed for %s", async (_name, replacement) => {
+    const { keyPackage, template } = await build([0x4a4a, 0xeaea]);
+    const event = withProposalTags(template.tags, replacement);
+    expect(() => checkKeyPackageProposalsTag(event, keyPackage)).not.toThrow();
+    expect(checkKeyPackageProposalsTag(event, keyPackage)).toEqual({
+      kind: "malformed",
+    });
+  });
+
+  it("returns exact for a no-GREASE leaf and its GREASE-free tag", async () => {
+    const { keyPackage, template } = await build([]);
+    expect(keyPackage.leafNode.capabilities.proposals).toEqual([
+      0x0008, 0x000a,
+    ]);
+    const event = withProposalTags(template.tags, [
+      ["mls_proposals", "0x0008", "0x000a"],
+    ]);
+    expect(checkKeyPackageProposalsTag(event, keyPackage)).toEqual({
+      kind: "match",
+      mode: "exact",
+    });
+  });
+});
+
 describe("getKeyPackageLifetime (WIRE-01 inbound read)", () => {
   const VALID_ACCOUNT = testAccount(5);
   const validPubkey = VALID_ACCOUNT.pubkey;
@@ -749,7 +969,16 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
   const VALID_ACCOUNT = testAccount(5);
   const validPubkey = VALID_ACCOUNT.pubkey;
 
-  async function buildEvent(lifetime: { notBefore: bigint; notAfter: bigint }) {
+  /**
+   * Builds a framed KeyPackage event with the given Lifetime. Its tags carry
+   * one mls_proposals tag built from the leaf's proposals (lowercase 0x%04x,
+   * deduplicated) unless `options.proposalsTag` overrides it. Passing
+   * `options.proposals` pins the leaf proposals via a capabilities override.
+   */
+  async function buildEvent(
+    lifetime: { notBefore: bigint; notAfter: bigint },
+    options: { proposals?: number[]; proposalsTag?: string[] } = {},
+  ) {
     const credential = createCredential(validPubkey);
     const ciphersuiteImpl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -759,6 +988,14 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
       credential,
       ciphersuiteImpl,
       signer: VALID_ACCOUNT.signer,
+      ...(options.proposals
+        ? {
+            capabilities: {
+              ...defaultCapabilities(),
+              proposals: options.proposals,
+            },
+          }
+        : {}),
     });
     const tamperedPublicPackage = {
       ...keyPackage.publicPackage,
@@ -769,12 +1006,20 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
       wireformat: wireformats.mls_key_package,
       keyPackage: tamperedPublicPackage,
     });
+    const leafProposalsTag = [
+      "mls_proposals",
+      ...new Set(
+        tamperedPublicPackage.leafNode.capabilities.proposals.map(
+          (p) => `0x${p.toString(16).padStart(4, "0")}`,
+        ),
+      ),
+    ];
     const event: NostrEvent = {
       kind: ADDRESSABLE_KEY_PACKAGE_KIND,
       pubkey: validPubkey,
       created_at: unixNow(),
       content: bytesToBase64(framedBytes),
-      tags: [],
+      tags: [options.proposalsTag ?? leafProposalsTag],
       id: "lifetime-eligibility-id",
       sig: "lifetime-eligibility-sig",
     };
@@ -834,5 +1079,59 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
     expect(
       result.reasons.some((r) => r.toLowerCase().includes("lifetime")),
     ).toBe(true);
+  });
+
+  describe("mls_proposals tag match (MDK exact-match parity)", () => {
+    const GREASE_PROPOSALS = [0x4a4a, 0xeaea];
+
+    function currentLifetime() {
+      const now = BigInt(unixNow());
+      return { notBefore: now, notAfter: now + 7257600n };
+    }
+
+    it("reports a mismatched mls_proposals tag", async () => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag: ["mls_proposals", "0x4a4a", "0xeaea", "0x0008"],
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        true,
+      );
+    });
+
+    it("reports a malformed (duplicate-value) mls_proposals tag", async () => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag: ["mls_proposals", "0x0008", "0x0008", "0x000a"],
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        true,
+      );
+    });
+
+    it.each([
+      ["the raw GREASE-bearing tag", undefined],
+      ["the legacy GREASE-stripped tag", ["mls_proposals", "0x0008", "0x000a"]],
+    ])("adds no mls_proposals reason for %s", async (_name, proposalsTag) => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag,
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        false,
+      );
+      expect(result.eligible).toBe(true);
+    });
   });
 });

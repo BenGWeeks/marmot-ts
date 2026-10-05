@@ -21,6 +21,7 @@ import { forgeKeyPackage } from "../../../__tests__/helpers/account-identity-pro
 import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
 import { getMarmotGroupView } from "../../../core/client-state.js";
 import { createCredential } from "../../../core/credential.js";
+import { defaultCapabilities } from "../../../core/default-capabilities.js";
 import { createSimpleGroup } from "../../../core/group.js";
 import { createKeyPackageEvent } from "../../../core/key-package-event.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
@@ -252,6 +253,94 @@ describe("createInviteIntent", () => {
         }),
       ).toThrow(/^createInviteIntent: .*lifetime/);
     });
+
+    /**
+     * Builds an invitee KeyPackage whose leaf proposals are deterministically
+     * [0x4a4a, 0xeaea, 0x0008, 0x000a], rewrites its mls_proposals tag with
+     * `transform` (returning `undefined` removes the tag), and signs it with
+     * the invitee's own signer so the signature and credential still match.
+     */
+    async function greaseInviteeEvent(
+      transform: (tag: string[]) => string[] | undefined,
+    ) {
+      const invitee = PrivateKeyAccount.generateNew();
+      const pubkey = await invitee.signer.getPublicKey();
+      const keyPackage = await generateKeyPackage({
+        credential: createCredential(pubkey),
+        ciphersuiteImpl: ciphersuite,
+        signer: invitee.signer,
+        capabilities: { ...defaultCapabilities(), proposals: [0x4a4a, 0xeaea] },
+      });
+      const template = await createKeyPackageEvent({
+        keyPackage: keyPackage.publicPackage,
+        identifier: pubkey,
+      });
+      const tags: string[][] = [];
+      for (const tag of template.tags) {
+        if (tag[0] !== "mls_proposals") {
+          tags.push(tag);
+          continue;
+        }
+        const replaced = transform(tag);
+        if (replaced) tags.push(replaced);
+      }
+      return invitee.signer.signEvent({ ...template, tags });
+    }
+
+    it("accepts the raw mls_proposals tag with GREASE (MDK / current marmot-ts)", async () => {
+      const event = await greaseInviteeEvent((tag) => tag);
+      expect(event.tags.find((t) => t[0] === "mls_proposals")).toEqual([
+        "mls_proposals",
+        "0x4a4a",
+        "0xeaea",
+        "0x0008",
+        "0x000a",
+      ]);
+
+      const intent = createInviteIntent({
+        keyPackageEvent: event,
+        actorPubkey: "a".repeat(64),
+      });
+      expect(intent.kind).toBe("commit");
+    });
+
+    it("accepts the legacy GREASE-stripped mls_proposals tag", async () => {
+      const event = await greaseInviteeEvent(() => [
+        "mls_proposals",
+        "0x0008",
+        "0x000a",
+      ]);
+
+      const intent = createInviteIntent({
+        keyPackageEvent: event,
+        actorPubkey: "a".repeat(64),
+      });
+      expect(intent.kind).toBe("commit");
+    });
+
+    it.each([
+      [
+        "missing a real proposal",
+        () => ["mls_proposals", "0x4a4a", "0xeaea", "0x0008"],
+      ],
+      [
+        "a duplicate value",
+        () => ["mls_proposals", "0x0008", "0x0008", "0x000a"],
+      ],
+      ["an absent tag", () => undefined],
+    ])(
+      "throws createInviteIntent: ... mls_proposals for %s",
+      async (_name, transform) => {
+        const event = await greaseInviteeEvent(transform);
+
+        expect(() =>
+          createInviteIntent({
+            keyPackageEvent: event,
+            actorPubkey: "a".repeat(64),
+          }),
+        ).toThrow(/^createInviteIntent: .*mls_proposals/);
+      },
+    );
 
     it("still builds a commit intent for a fully-valid keyPackageEvent (no regression)", async () => {
       const { event, pubkey } = await inviteeKeyPackageEvent();
