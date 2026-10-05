@@ -44,7 +44,7 @@ const fixture = fixtureJson as SafeAadFixture;
 
 describe("MDK SafeAAD parity", () => {
   it("matches the dictionary extracted from a genuine MDK KeyPackage", async () => {
-    expect(fixture.mdk_sha).toBe("dbf45c83a8e157302edd13010944ad2c6a9cf9a5");
+    expect(fixture.mdk_sha).toBe("798a3e07ede494d98c2ecf590c6e838a8c1dfcfe");
     expect(fixture.source).toContain("CgkaEngine::fresh_key_package");
     expect(fixture.extraction).toContain("KeyPackage::bytes");
 

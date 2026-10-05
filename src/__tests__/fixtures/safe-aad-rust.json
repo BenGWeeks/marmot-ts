@@ -10,7 +10,7 @@
   "dictionary_projection": "exact extracted SafeAAD entry only; current account-proof bytes are intentionally excluded as nondeterministic",
   "dictionary_sha256": "1488eb12e7041072e9446639f22054ed76cfdc3c53680f401ebeddb56924cc74",
   "extraction": "Engine::fresh_key_package -> KeyPackage::bytes -> MlsMessageIn -> LeafNode",
-  "mdk_sha": "dbf45c83a8e157302edd13010944ad2c6a9cf9a5",
+  "mdk_sha": "798a3e07ede494d98c2ecf590c6e838a8c1dfcfe",
   "safe_aad_hex": "00",
   "source": "refs/mdk cgka_engine::Engine implementing cgka_traits::CgkaEngine::fresh_key_package"
 }

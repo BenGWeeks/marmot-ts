@@ -47,7 +47,7 @@
     "projection_sha256": "dc43f12e19dfa38135b944c61d9dfc12543188e14adf611cff0439e0aa2c2452",
     "serialized_hex": "000000006a9da0c0000000006b0c6cd0"
   },
-  "mdk_sha": "dbf45c83a8e157302edd13010944ad2c6a9cf9a5",
+  "mdk_sha": "798a3e07ede494d98c2ecf590c6e838a8c1dfcfe",
   "openmls_rev": "59e7d3b27a7e95237879dd5478de1fd90eff7ada",
   "projection_version": 1,
   "source": "refs/mdk cgka-engine key_package.rs + capabilities.rs at pinned OpenMLS",

@@ -61,7 +61,7 @@ describe("MDK KeyPackage lifetime parity", () => {
   afterEach(() => vi.useRealTimers());
 
   it("matches fixed Lifetime bytes and the accepted range boundary", () => {
-    expect(rust.mdk_sha).toBe("dbf45c83a8e157302edd13010944ad2c6a9cf9a5");
+    expect(rust.mdk_sha).toBe("798a3e07ede494d98c2ecf590c6e838a8c1dfcfe");
     expect(rust.projection_version).toBe(1);
     expect(
       bytesToHex(

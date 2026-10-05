@@ -17,7 +17,7 @@ import {
 import { KEY_PACKAGE_APP_COMPONENTS_TAG } from "../protocol.js";
 
 /**
- * The pinned MDK tag fixture (`mdk_sha` `dbf45c83`) predates the spec rule
+ * The pinned MDK tag fixture (`mdk_sha` `798a3e07`) predates the spec rule
  * that the `app_components` tag MUST include `0x8009`
  * (`refs/marmot/transports/nostr.md`). Production now advertises it (via
  * `SUPPORTED_APP_COMPONENT_IDS`), inserted immediately before `0x800c`.
@@ -65,7 +65,7 @@ describe("MDK kind-30443 tag parity", () => {
   const rust = tagFixture as TagFixture;
 
   it("matches the Rust-produced canonical tag array and order, plus 0x8009 (refs/marmot/transports/nostr.md)", async () => {
-    expect(rust.mdk_sha).toBe("dbf45c83a8e157302edd13010944ad2c6a9cf9a5");
+    expect(rust.mdk_sha).toBe("798a3e07ede494d98c2ecf590c6e838a8c1dfcfe");
     expect(
       bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(rust.tags)))),
     ).toBe(rust.tags_sha256);
