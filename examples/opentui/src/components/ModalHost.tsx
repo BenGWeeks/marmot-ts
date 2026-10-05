@@ -8,6 +8,7 @@ import { ChoicePrompt } from "./ChoicePrompt.js";
 import { GroupDebugModal } from "./GroupDebugModal.js";
 import { GroupInfoModal } from "./GroupInfoModal.js";
 import { HelpOverlay } from "./HelpOverlay.js";
+import { InviteLoadingModal } from "./InviteLoadingModal.js";
 import { InviteDetailsModal } from "./InviteDetailsModal.js";
 import { InviteModal } from "./InviteModal.js";
 import { KeyPackageModal } from "./KeyPackageModal.js";
@@ -24,6 +25,7 @@ export type Modal =
   | { kind: "new-relays"; name: string }
   | { kind: "new-manual-relays"; name: string }
   | { kind: "invite" }
+  | { kind: "invite-loading"; target: string }
   | { kind: "invite-select"; data: InviteCandidates }
   | { kind: "invite-details"; inviteId: string }
   | { kind: "keypkg" }
@@ -143,13 +145,19 @@ export function ModalHost(props: {
           title="invite to the active group"
           placeholder="npub, hex pubkey, or name@domain"
           onSubmit={(value) => {
-            setModal(null);
             const target = value.trim();
-            if (!target) return;
-            void controller.loadInviteCandidates(target).then((data) => {
-              if (data) setModal({ kind: "invite-select", data });
-            });
+            setModal(target ? { kind: "invite-loading", target } : null);
           }}
+          onCancel={() => setModal(null)}
+        />
+      );
+    case "invite-loading":
+      return (
+        <InviteLoadingModal
+          target={modal.target}
+          onDone={(data) =>
+            setModal(data ? { kind: "invite-select", data } : null)
+          }
           onCancel={() => setModal(null)}
         />
       );

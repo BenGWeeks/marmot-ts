@@ -804,9 +804,13 @@ export class MarmotController {
    * it can be added to the active group. The invite UI lists the result (newest
    * first) so an admin can choose which device(s) to invite; nothing is sent
    * here. Returns `null` (and logs) on any failure so the caller can simply skip
-   * opening the selection modal.
+   * opening the selection modal. `onProgress` receives a short description of
+   * each lookup step so the invite modal can show what it is waiting on.
    */
-  async loadInviteCandidates(input: string): Promise<InviteCandidates | null> {
+  async loadInviteCandidates(
+    input: string,
+    onProgress?: (step: string) => void,
+  ): Promise<InviteCandidates | null> {
     if (this.#watchAbort) return null;
     this.#busy = true;
     this.#publish();
@@ -820,6 +824,7 @@ export class MarmotController {
             `invalid pubkey, npub, or NIP-05 identifier: ${input}`,
           );
         }
+        onProgress?.(`resolving ${input}…`);
         const identity = await this.#directory.resolveNip05(input);
         pubkeyHex = identity.pubkey;
         nip05Relays = normalizeRelays(identity.relays);
@@ -835,10 +840,16 @@ export class MarmotController {
       // window instead of timing out and falling back to NIP-05/session
       // relays.
       this.log(`discovering KeyPackages for ${npubShort(pubkeyHex)}…`);
-      const discovered = await this.#directory.outboxes(
-        pubkeyHex,
-        relaySet(nip05Relays, this.#relays, LOOKUP_RELAYS),
-      );
+      onProgress?.(`finding outbox/inbox relays for ${npubShort(pubkeyHex)}…`);
+      // The 10050 inbox lookup runs alongside the outbox one so the Welcome
+      // delivery that follows a successful invite finds it already cached.
+      const lookupHints = relaySet(nip05Relays, this.#relays, LOOKUP_RELAYS);
+      const [discovered] = await Promise.all([
+        this.#directory.outboxes(pubkeyHex, lookupHints),
+        this.#directory
+          .welcomeInboxes(pubkeyHex, lookupHints)
+          .catch(() => [] as string[]),
+      ]);
       this.log(
         discovered.length
           ? `NIP-65 outbox: ${discovered.join(", ")}`
@@ -846,6 +857,9 @@ export class MarmotController {
       );
       const searchRelays = relaySet(nip05Relays, discovered, this.#relays);
       this.log(`fetching KeyPackages from ${searchRelays.join(", ")}`);
+      onProgress?.(
+        `fetching KeyPackages from ${searchRelays.length} relay(s)…`,
+      );
       // KeyPackages are public, so this lookup does not wait on auth: a relay
       // whose connection was flagged auth-required by another REQ (e.g.
       // ditto gating our kind-1059 inbox) would otherwise hold this REQ
