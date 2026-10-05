@@ -969,7 +969,16 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
   const VALID_ACCOUNT = testAccount(5);
   const validPubkey = VALID_ACCOUNT.pubkey;
 
-  async function buildEvent(lifetime: { notBefore: bigint; notAfter: bigint }) {
+  /**
+   * Builds a framed KeyPackage event with the given Lifetime. Its tags carry
+   * one mls_proposals tag built from the leaf's proposals (lowercase 0x%04x,
+   * deduplicated) unless `options.proposalsTag` overrides it. Passing
+   * `options.proposals` pins the leaf proposals via a capabilities override.
+   */
+  async function buildEvent(
+    lifetime: { notBefore: bigint; notAfter: bigint },
+    options: { proposals?: number[]; proposalsTag?: string[] } = {},
+  ) {
     const credential = createCredential(validPubkey);
     const ciphersuiteImpl = await getCiphersuiteImpl(
       "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
@@ -979,6 +988,14 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
       credential,
       ciphersuiteImpl,
       signer: VALID_ACCOUNT.signer,
+      ...(options.proposals
+        ? {
+            capabilities: {
+              ...defaultCapabilities(),
+              proposals: options.proposals,
+            },
+          }
+        : {}),
     });
     const tamperedPublicPackage = {
       ...keyPackage.publicPackage,
@@ -989,12 +1006,20 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
       wireformat: wireformats.mls_key_package,
       keyPackage: tamperedPublicPackage,
     });
+    const leafProposalsTag = [
+      "mls_proposals",
+      ...new Set(
+        tamperedPublicPackage.leafNode.capabilities.proposals.map(
+          (p) => `0x${p.toString(16).padStart(4, "0")}`,
+        ),
+      ),
+    ];
     const event: NostrEvent = {
       kind: ADDRESSABLE_KEY_PACKAGE_KIND,
       pubkey: validPubkey,
       created_at: unixNow(),
       content: bytesToBase64(framedBytes),
-      tags: [],
+      tags: [options.proposalsTag ?? leafProposalsTag],
       id: "lifetime-eligibility-id",
       sig: "lifetime-eligibility-sig",
     };
@@ -1054,5 +1079,59 @@ describe("evaluateKeyPackageForGroup — Lifetime check (WIRE-01)", () => {
     expect(
       result.reasons.some((r) => r.toLowerCase().includes("lifetime")),
     ).toBe(true);
+  });
+
+  describe("mls_proposals tag match (MDK exact-match parity)", () => {
+    const GREASE_PROPOSALS = [0x4a4a, 0xeaea];
+
+    function currentLifetime() {
+      const now = BigInt(unixNow());
+      return { notBefore: now, notAfter: now + 7257600n };
+    }
+
+    it("reports a mismatched mls_proposals tag", async () => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag: ["mls_proposals", "0x4a4a", "0xeaea", "0x0008"],
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        true,
+      );
+    });
+
+    it("reports a malformed (duplicate-value) mls_proposals tag", async () => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag: ["mls_proposals", "0x0008", "0x0008", "0x000a"],
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.eligible).toBe(false);
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        true,
+      );
+    });
+
+    it.each([
+      ["the raw GREASE-bearing tag", undefined],
+      ["the legacy GREASE-stripped tag", ["mls_proposals", "0x0008", "0x000a"]],
+    ])("adds no mls_proposals reason for %s", async (_name, proposalsTag) => {
+      const { event, fakeState } = await buildEvent(currentLifetime(), {
+        proposals: GREASE_PROPOSALS,
+        proposalsTag,
+      });
+
+      const result = evaluateKeyPackageForGroup(fakeState, event);
+
+      expect(result.reasons.some((r) => r.includes("mls_proposals"))).toBe(
+        false,
+      );
+      expect(result.eligible).toBe(true);
+    });
   });
 });
