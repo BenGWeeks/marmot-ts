@@ -8,7 +8,9 @@ requires:
   - phase: 11-exports-snapshot-qa-gate
     provides: "plans 11-01 (stale-reference/MIP-citation hygiene) and 11-02 (exports snapshot guard + package-smoke signer fix), both merged to master"
 provides:
-  - "Full local gate evidence (lint, build, package smoke, three-runtime suite + extended conformance) for the pushed candidate SHA"
+  - "Full local gate evidence (lint, build, package smoke, three-runtime suite + extended conformance) for candidate SHA 785a1df"
+  - "GitHub Actions evidence: all nine required Tests/Build jobs green for pushed SHA c2f5a12 (a descendant of the candidate)"
+  - "QA-04 verdict: green locally (Node v26.9.0, Deno 2.9.6, Bun 1.3.14) and in CI (Node 20/22/24, Deno v2.x, Bun latest/1.1, build, package smoke x2)"
   - "D-07/D-08/D-09 verification outcomes"
   - "0xf2f1 inventory confirming exactly the 14-path CUT-02 keep set"
 affects: [11-exports-snapshot-qa-gate]
@@ -22,10 +24,11 @@ key-files:
   modified: []
 
 key-decisions:
-  - "D-07 STATE.md gap (title-case phase name absent, only kebab-case slug present) recorded as a caveat, not fixed — this executor's orchestrator instructions explicitly reserve STATE.md/ROADMAP.md writes for the orchestrator"
-  - "No fix(11)/chore(11) commits were needed — every gate step (lint, build, package smoke, three-runtime suite, extended conformance, all integrity audits) passed green on the first attempt"
+  - "D-07 STATE.md gap (title-case phase name absent, only kebab-case slug present) recorded as a caveat, not fixed — the orchestrator's instructions reserve STATE.md/ROADMAP.md writes for the orchestrator"
+  - "No fix(11)/chore(11) commits were needed — every local gate step and every required CI job passed green on the first attempt"
+  - "CI evidence is tied to PUSHED_SHA c2f5a12 (a descendant of the locally-gated candidate 785a1df, 23 later docs/quick-task commits including quick task 261005-dd6), not to 785a1df itself; ancestry of every Phase 11 commit was verified"
 
-requirements-completed: []
+requirements-completed: [QA-04, QA-05]
 
 coverage:
   - id: D-05-D-06
@@ -33,7 +36,15 @@ coverage:
     requirement: "QA-04"
     verification:
       - kind: other
-        ref: "pnpm lint; pnpm build; bash scripts/package-smoke/run.sh; pnpm vitest run; deno run -A --node-modules-dir=auto npm:vitest run; bun run vitest run; pnpm conformance:extended (+Deno/Bun variants) — all exit 0, this session"
+        ref: "pnpm lint; pnpm build; bash scripts/package-smoke/run.sh; pnpm vitest run; deno run -A --node-modules-dir=auto npm:vitest run; bun run vitest run; pnpm conformance:extended (+Deno/Bun variants) — all exit 0, Task 1 session"
+        status: pass
+    human_judgment: false
+  - id: D-05-CI
+    description: "GitHub Actions Tests run (Node 20/22/24, Deno v2.x, Bun latest, Bun 1.1) and Build run (build, Package smoke Node 20.x/24.x) all conclude success for pushed SHA c2f5a1201f3199655e17513e62a7b3392ef85b66"
+    requirement: "QA-04"
+    verification:
+      - kind: other
+        ref: "gh run view 37328779021 / 37328778947 --repo marmot-protocol/marmot-ts --json jobs — nine jobs, all success; runs filtered by headSha == PUSHED_SHA"
         status: pass
     human_judgment: false
   - id: D-09
@@ -41,20 +52,26 @@ coverage:
     requirement: "QA-04"
     verification:
       - kind: other
-        ref: "git -C refs/mdk rev-parse HEAD; git log --oneline -1 4a7130d; git -C refs/marmot fetch + log HEAD..origin/HEAD; git -C refs/mdk fetch + log HEAD..origin/HEAD — all this session"
+        ref: "git -C refs/mdk rev-parse HEAD; git log --oneline -1 4a7130d; git -C refs/marmot fetch + log HEAD..origin/HEAD; git -C refs/mdk fetch + log HEAD..origin/HEAD — Task 1 session"
+        status: pass
+    human_judgment: false
+  - id: QA-05
+    description: "Final tree has zero MIP-NN citations in src/, zero dead legacy-proof-module pointers, 0xf2f1 only in the 14-path CUT-02 keep set, exports snapshot guard in place, zero skipped tests"
+    requirement: "QA-05"
+    verification:
+      - kind: other
+        ref: "Task 1 audits (grep counts, 0xf2f1 inventory) plus plans 11-01/11-02 SUMMARYs; src/__tests__/exports.test.ts runs inside the green three-runtime and CI suites"
         status: pass
     human_judgment: false
 
-duration: pending (draft — Task 1 only; Task 2 checkpoint + Task 3 CI evidence remain)
-completed: pending
-status: in-progress
+duration: "~15m for Task 3 (continuation); Task 1 ran 2026-09-28, push checkpoint resolved 2026-10-05"
+completed: 2026-10-05
+status: complete
 ---
 
-# Phase 11 Plan 03: QA Gate & CI Evidence Summary (DRAFT — Task 1 complete, awaiting push)
+# Phase 11 Plan 03: QA Gate & CI Evidence Summary
 
-**This is a draft SUMMARY covering Task 1 (the full local gate) only.** Task 2 is a blocking
-`checkpoint:human-action` — the user must push `master` — and Task 3 (CI evidence collection) has
-not run yet. A continuation agent will complete this SUMMARY after the push.
+**Full local gate green on Node v26.9.0 / Deno 2.9.6 / Bun 1.3.14, and all nine required GitHub Actions jobs (Node 20/22/24, Deno v2.x, Bun latest/1.1, build, Package smoke x2) green for pushed SHA `c2f5a1201f3199655e17513e62a7b3392ef85b66` — QA-04 and QA-05 satisfied; no fix commits needed.**
 
 ## Local Gate Evidence (Task 1)
 
@@ -82,11 +99,68 @@ not run yet. A continuation agent will complete this SUMMARY after the push.
 | Working tree | `git status --porcelain -- src scripts docs .github package.json pnpm-lock.yaml tsconfig.json tsconfig.build.json` | — | empty (clean) | 0 |
 | Opentui isolation | `git log 4a7130d..HEAD --format= --name-only \| grep -c '^examples/opentui/package.json$'` | — | 0 | 0 |
 
-**No `fix(11)` or `chore(11)` commits were required.** Every gate step listed above passed green on
-the first attempt; the plan's failure-handling protocol (small fix inline, re-run gate; or escalate)
-was never triggered.
+**No `fix(11)` or `chore(11)` commits were required.** Every gate step passed green on the first
+attempt; the plan's failure-handling protocol was never triggered.
 
 **Runtime versions used:** Node v26.9.0, Deno 2.9.6, Bun 1.3.14, pnpm (per repo lockfile).
+
+## CI evidence (Task 3)
+
+**PUSHED_SHA:** `c2f5a1201f3199655e17513e62a7b3392ef85b66` (GitHub `marmot-protocol/marmot-ts` master, verified via
+`gh api repos/marmot-protocol/marmot-ts/commits/master`; pushed by the user — Claude never pushed).
+
+**Ancestry check (plan Task 3 step 1):** `git merge-base --is-ancestor 785a1df c2f5a12` exits 0, and every one of
+the 14 commits in `git log 4a7130d..785a1df --format=%H` is an ancestor of `c2f5a12` (zero non-ancestors). The
+pushed SHA is a descendant of the locally-gated candidate with 23 later commits (docs/tracking and quick task
+261005-dd6, mls_proposals GREASE parity — `7b59a72`, `162239d`, `c2f5a12`). The CI evidence below therefore covers the
+Phase 11 code plus those later commits; the candidate `785a1df` itself was not a separate CI target.
+
+Runs were located with `gh run list --repo marmot-protocol/marmot-ts --commit c2f5a12… --json …` and every row below
+has `headSha == PUSHED_SHA`, `headBranch == master`, `status == completed`.
+
+| Workflow | Run ID | Job URL | Job name | Conclusion | SHA |
+|---|---|---|---|---|---|
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194437 | Test on Node.js 20.x | success | c2f5a12 |
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194436 | Test on Node.js 22.x | success | c2f5a12 |
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194553 | Test on Node.js 24.x | success | c2f5a12 |
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194222 | Test on Deno v2.x | success | c2f5a12 |
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194465 | Test on Bun latest | success | c2f5a12 |
+| Tests | 37328779021 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021/job/111826194614 | Test on Bun 1.1 | success | c2f5a12 |
+| Build | 37328778947 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328778947/job/111826194352 | build | success | c2f5a12 |
+| Build | 37328778947 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328778947/job/111826642674 | Package smoke (Node 20.x) | success | c2f5a12 |
+| Build | 37328778947 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328778947/job/111826642522 | Package smoke (Node 24.x) | success | c2f5a12 |
+
+Run URLs: Tests https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779021 ; Build https://github.com/marmot-protocol/marmot-ts/actions/runs/37328778947 .
+
+All job names match the plan's expected spelling exactly; no name mapping was needed. Acceptance checks, run live:
+`gh run list --commit c2f5a12… --json workflowName,conclusion` filtered to Tests/Build prints `success` twice and
+nothing else; `gh run view … --json jobs --jq '.jobs[] | select(.conclusion != "success") | .name'` prints nothing for
+both runs.
+
+### Informational runs (not gating)
+
+| Workflow | Run ID | Run URL | Conclusion | Note |
+|---|---|---|---|---|
+| GitHub Pages | 37328779179 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779179 | success | docs deploy for PUSHED_SHA |
+| Release | 37328779187 | https://github.com/marmot-protocol/marmot-ts/actions/runs/37328779187 | success | Updated the changesets "Version Packages" PR — #75 (https://github.com/marmot-protocol/marmot-ts/pull/75), `updatedAt` 2026-10-05T14:57:38Z, i.e. after the commit time of `c2f5a12` (14:52:59Z). No npm publish (changesets still pending). |
+
+Also present on GitHub, informational only: `changeset-release/master` workflow runs (head `d4de504`) in state
+`action_required` — that branch is the Version Packages PR's, whose workflows await maintainer approval. Not a
+Phase 11 gate and unrelated to PUSHED_SHA.
+
+## QA-04 verdict
+
+**QA-04: PASSED.** The full Vitest suite is green on every required runtime:
+
+- **Local (Task 1):** Node v26.9.0, Deno 2.9.6, Bun 1.3.14 — 115 files / 1310 tests / 0 failed on each, plus extended conformance on each.
+- **CI (Task 3, PUSHED_SHA `c2f5a12`):** Node 20.x, 22.x, 24.x; Deno v2.x; Bun latest; Bun 1.1 — all `success` (Tests run 37328779021).
+- **Build / lint / package smoke (D-06):** `pnpm lint` clean and `pnpm build` + `bash scripts/package-smoke/run.sh` green locally (Node/Bun/Deno); CI `build` plus `Package smoke (Node 20.x)` and `Package smoke (Node 24.x)` all `success` (Build run 37328778947).
+- Zero skipped/only/todo tests; no test weakened (T-11-12).
+
+**QA-05: PASSED.** Zero `MIP-NN` citations in `src/`, zero dead legacy-proof-module pointers, `0xf2f1` appears only in the
+14-path CUT-02 keep set (see inventory), and the exports snapshot guard (`src/__tests__/exports.test.ts`, plan 11-02)
+runs green in every local and CI runtime. Local evidence is from Task 1 plus plans 11-01/11-02; the CI suite
+exercising the guard is part of the green Tests run above.
 
 ## D-07 Outcome (with caveat)
 
@@ -95,38 +169,36 @@ criterion). The same grep against `.planning/STATE.md` returns **0** — `STATE.
 the kebab-case slug `exports-snapshot-qa-gate` (in `current_phase_name`, "Current focus", and
 "Current Position") rather than the title-case string `Exports Snapshot & QA Gate`. This is a real,
 literal gap against the plan's acceptance criterion text, but it is benign: the phase is unambiguously
-identified in STATE.md by its slug and number ("Phase 11 — exports-snapshot-qa-gate" /
-"Phase: 11 (exports-snapshot-qa-gate)"), so D-07's underlying intent (the phase is renamed and
-consistently tracked) is satisfied in substance. This executor did **not** edit STATE.md to add the
-title-case string, because the orchestrator's instructions for this execution explicitly reserve
-STATE.md/ROADMAP.md writes for the orchestrator. **Flagging for the orchestrator's attention**: either
-accept the kebab-case slug as satisfying D-07, or add the title-case phrase to STATE.md in its own
-pass.
+identified in STATE.md by its slug and number, so D-07's underlying intent (the phase is renamed and
+consistently tracked) is satisfied in substance. The executor did **not** edit STATE.md because the
+orchestrator's instructions reserve STATE.md/ROADMAP.md writes for the orchestrator. **Flagging for the
+orchestrator:** either accept the kebab-case slug as satisfying D-07, or add the title-case phrase to
+STATE.md in its own pass.
 
 ## D-08 Outcome
 
 Already resolved — no work performed. `pnpm lint` passes with zero diffs. Per 11-RESEARCH.md, the
 drift documented in Phase 10's `deferred-items.md` was fixed by commit `92bbdb8` during Phase 10
-itself, before this phase began. No `pnpm format` was run and no commit was made (running it would
-have produced an empty/no-op commit, which the plan explicitly forbids).
+itself, before this phase began. No `pnpm format` was run and no commit was made (it would have
+produced an empty/no-op commit, which the plan explicitly forbids).
 
 ## D-09 Verification
 
 `refs/mdk` is confirmed at `798a3e07ede494d98c2ecf590c6e838a8c1dfcfe`, landed by commit `4a7130d`
 (`chore(refs): fast-forward mdk to 798a3e07`) — this executor did not bump the submodule, only
-verified the precondition, per the plan's explicit "already done by the orchestrator" instruction.
+verified the precondition.
 
 **Upstream drift since research:** `refs/marmot` shows 0 new commits (`HEAD..origin/HEAD` empty).
-`refs/mdk` also shows 0 new commits on the tracked ref (`HEAD..origin/HEAD` empty); the fetch surfaced
-two unrelated feature branches (`claude/recovery-audit-v5`, `claude/recovery-retire-inline-executor`)
-that are not on the default/tracked branch and are not evaluated here. No new upstream commits require
-a decision — 11-RESEARCH.md's verdict ("no contradiction with shipped v2.0 behavior" for the reviewed
-range `73446bc9..798a3e07`) stands unchanged.
+`refs/mdk` also shows 0 new commits on the tracked ref; the fetch surfaced two unrelated feature
+branches (`claude/recovery-audit-v5`, `claude/recovery-retire-inline-executor`) that are not on the
+tracked branch and are not evaluated here. No new upstream commits require a decision —
+11-RESEARCH.md's verdict ("no contradiction with shipped v2.0 behavior" for `73446bc9..798a3e07`)
+stands unchanged.
 
 ## 0xf2f1 Inventory
 
 `grep -rl '0xf2f1' src docs README.md | sort` returned exactly 14 paths, matching the expected
-CUT-02 keep set from 11-RESEARCH.md/the plan's interfaces block byte-for-byte:
+CUT-02 keep set byte-for-byte:
 
 ```
 docs/client/best-practices.md
@@ -147,11 +219,11 @@ src/__tests__/exports.test.ts
 
 No extra or missing paths — QA-05's "0xf2f1 only in the CUT-02 keep set" criterion holds.
 
-## Push Hand-off (for Task 2 / continuation agent)
+## Push Hand-off (history)
 
-**Candidate SHA:** `785a1df80fd5d9be29a2e5253c94ded8888762d6`
+**Candidate SHA (locally gated):** `785a1df80fd5d9be29a2e5253c94ded8888762d6`
 
-**Unpushed commits** (`git log --oneline origin/master..master`, 18 total, oldest last):
+Commits unpushed at the time of Task 1 (`git log --oneline origin/master..master`, 18 total, oldest last):
 
 ```
 785a1df docs(phase-11): update tracking after wave 1
@@ -174,30 +246,36 @@ bec6cef docs(11): create phase plan
 cde0a88 docs(planning): drop QA-03 Rust-signed fixture requirement from v2.0
 ```
 
-**Nothing has been pushed.** Task 2 (`checkpoint:human-action`) is next: the user must push `master`
-themselves. This executor stops here.
+**Task 2 resolution:** the user pushed master themselves (resume signal: "pushed c2f5a1201f3199655e17513e62a7b3392ef85b66").
+Claude did not push (T-11-10). The pushed SHA descends from the candidate; see CI evidence above.
 
 ## Deviations from Plan
 
 ### Auto-fixed Issues
 
-None — plan executed exactly as written for Task 1. No `fix(11)`/`chore(11)` commits were needed.
+None — plan executed exactly as written. No `fix(11)`/`chore(11)` commits were needed and the CI failure protocol was never triggered.
 
-### Escalations (not auto-fixed)
+### Notes / Escalations (not auto-fixed)
 
-**1. [Rule 4 boundary — documented, not fixed] D-07 STATE.md title-case gap**
+**1. [Informational] PUSHED_SHA is a descendant of, not equal to, the locally-gated candidate**
+- The user pushed after 23 additional commits landed (docs/tracking plus quick task 261005-dd6). Per Task 2's acceptance criteria a descendant is valid; the ancestry check passed for every Phase 11 commit. CI therefore validated a superset of the locally gated tree.
+
+**2. [Rule 4 boundary — documented, not fixed] D-07 STATE.md title-case gap**
 - **Found during:** Task 1, step 2 (D-07 verification)
-- **Issue:** `.planning/STATE.md` never contains the literal string `Exports Snapshot & QA Gate`;
-  only the kebab-case slug `exports-snapshot-qa-gate` appears (3 locations).
-- **Why not auto-fixed:** This execution's orchestrator instructions explicitly state "Do NOT update
-  STATE.md or ROADMAP.md — the orchestrator owns those writes," overriding the plan's general
-  failure-handling protocol (which would normally treat a small doc fix as auto-fixable).
-- **Resolution:** Documented above under "D-07 Outcome (with caveat)" for the orchestrator to decide.
+- **Issue:** `.planning/STATE.md` never contains the literal string `Exports Snapshot & QA Gate`; only the kebab-case slug `exports-snapshot-qa-gate` appears.
+- **Why not auto-fixed:** orchestrator instructions explicitly reserve STATE.md/ROADMAP.md writes for the orchestrator.
+- **Resolution:** left for the orchestrator (see "D-07 Outcome").
 
-## Self-Check: IN PROGRESS
+**3. [Informational] Latent version-pin drift:** local Deno run resolved vitest 3.2.7 while CI pins `npm:vitest@3.2.6`. Both green; not a blocker.
 
-This SUMMARY will receive a final Self-Check section once Task 3 completes.
+## Self-Check: PASSED
+
+- Ancestry: all 14 commits in `4a7130d..785a1df` are ancestors of `c2f5a12` — verified this session (`bad=0`).
+- Runs: Tests (37328779021) and Build (37328778947) both `success`, `headSha == c2f5a12…` — verified via `gh run list --commit`.
+- Jobs: all nine required jobs listed with `success`; zero non-success jobs in either run — verified via `gh run view --json jobs`.
+- Pages (37328779179) and Release (37328779187) recorded as informational; Version Packages PR #75 confirmed updated after the push.
+- No STATE.md/ROADMAP.md edits and no push performed by this executor.
 
 ---
 *Phase: 11-exports-snapshot-qa-gate*
-*Task 1 completed: 2026-09-28 (this session) — Task 2 (push checkpoint) and Task 3 (CI evidence) pending*
+*Task 1 completed: 2026-09-28 — Task 2 (user push) resolved and Task 3 (CI evidence) completed: 2026-10-05*
