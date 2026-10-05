@@ -1,19 +1,20 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v2.0
-milestone_name: Account identity proof v2
-current_phase: 0
 status: Awaiting next milestone
 stopped_at: v2.0 milestone archived 2026-10-05; next is /gsd-new-milestone
-last_updated: "2026-10-05T15:38:57.487Z"
+last_updated: "2026-10-05T15:45:47.221Z"
 last_activity: 2026-10-05
 last_activity_desc: Milestone v2.0 completed and archived
+state_head: c325d5f0881fef8701e883bef46f628d55e18809
 progress:
   total_phases: 6
   completed_phases: 6
   total_plans: 27
   completed_plans: 27
   percent: 100
+milestone_name: Account identity proof v2
+current_phase: 0
 current_phase_name: BACKLOG
 ---
 
@@ -31,7 +32,7 @@ See: .planning/PROJECT.md (updated 2026-10-05)
 Phase: Milestone v2.0 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-05 — Milestone v2.0 completed and archived
+Last activity: 2026-10-05 - Completed quick task 261005-exf: Shorten AGENTS.md contributor guidelines
 
 ## Performance Metrics
 
@@ -161,16 +162,17 @@ None yet.
 
 ## Quick Tasks Completed
 
-| Date       | Slug                       | Summary                                                                                          |
-| ---------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
-| 2026-08-06 | reference-findings-phase-4 | Rolled marmot/mdk submodule findings into Phase 4; added standing per-phase reference-check rule |
-| 2026-09-11 | [260911-dqr](./quick/260911-dqr-delete-phase-5-quality-gate-scripts-and-/) | Deleted dead Phase 5 quality-gate scripts; removed self-remove.test.ts dependency on archived planning doc (0f5df0a, c8a77ce) |
-| 2026-09-12 | [260912-dph](./quick/260912-dph-add-nip-05-resolution-to-the-opentui-gro/) | Added NIP-05 invite resolution with DNS relay hints and focused OpenTUI tests |
-| 2026-09-30 | [260930-gpe](./quick/260930-gpe-opentui-relay-list-guard-for-group-creat/) | OpenTUI relay-list guard: retry incomplete 10002/10050 discovery (+lookup relays), hide empty outbox choice on new group, gate KeyPackage publish/rotate on both lists (8943c0a..c1c2999) |
-| 2026-09-30 | [260930-jj7](./quick/260930-jj7-opentui-nip-42-relay-auth-fix-for-invite/) | OpenTUI NIP-42 on-demand relay auth (fixes auth-gated relays stalling invite KeyPackage lookups + gift-wraps); invite lookup hints LOOKUP_RELAYS, waitForAuth:false (4f2a8ee..3aa11ef) |
-| 2026-10-05 | fast: opentui-invite-loading | OpenTUI invite modal shows spinner + current lookup step while fetching invitee relays/KeyPackages (3217bf8) |
-| 2026-10-05 | [261005-dd6](./quick/261005-dd6-mls-proposals-keep-grease-decode-accepts/) | KeyPackage `mls_proposals` tag keeps GREASE (MDK exact-match parity); new `checkKeyPackageProposalsTag` accepts exact or GREASE-stripped match, enforced at createInviteIntent + eligibility (7b59a72..162239d) |
-| 2026-09-12 | [260912-jlt](./quick/260912-jlt-vendor-forked-ts-mls-into-published-pack/) | Build vendors the ts-mls fork into dist/vendor/ts-mls (no npm ts-mls dep); tarball verifier + fork-publish guard; npm-tarball smoke CI on Node/Bun/Deno (56cce59, ef2ab76, c3c242c) |
+| # | Description | Date | Commit | Status | Directory |
+| --- | ------------- | ------ | -------- | -------- | ----------- |
+| 1 | reference-findings-phase-4 · Rolled marmot/mdk submodule findings into Phase 4; added standing per-phase reference-check rule | 2026-08-06 | — | — | — |
+| 2 | [260911-dqr](./quick/260911-dqr-delete-phase-5-quality-gate-scripts-and-/) · Deleted dead Phase 5 quality-gate scripts; removed self-remove.test.ts dependency on archived planning doc (0f5df0a, c8a77ce) | 2026-09-11 | — | — | — |
+| 3 | [260912-dph](./quick/260912-dph-add-nip-05-resolution-to-the-opentui-gro/) · Added NIP-05 invite resolution with DNS relay hints and focused OpenTUI tests | 2026-09-12 | — | — | — |
+| 4 | [260930-gpe](./quick/260930-gpe-opentui-relay-list-guard-for-group-creat/) · OpenTUI relay-list guard: retry incomplete 10002/10050 discovery (+lookup relays), hide empty outbox choice on new group, gate KeyPackage publish/rotate on both lists (8943c0a..c1c2999) | 2026-09-30 | — | — | — |
+| 5 | [260930-jj7](./quick/260930-jj7-opentui-nip-42-relay-auth-fix-for-invite/) · OpenTUI NIP-42 on-demand relay auth (fixes auth-gated relays stalling invite KeyPackage lookups + gift-wraps); invite lookup hints LOOKUP_RELAYS, waitForAuth:false (4f2a8ee..3aa11ef) | 2026-09-30 | — | — | — |
+| 6 | fast: opentui-invite-loading · OpenTUI invite modal shows spinner + current lookup step while fetching invitee relays/KeyPackages (3217bf8) | 2026-10-05 | — | — | — |
+| 7 | [261005-dd6](./quick/261005-dd6-mls-proposals-keep-grease-decode-accepts/) · KeyPackage `mls_proposals` tag keeps GREASE (MDK exact-match parity); new `checkKeyPackageProposalsTag` accepts exact or GREASE-stripped match, enforced at createInviteIntent + eligibility (7b59a72..162239d) | 2026-10-05 | — | — | — |
+| 8 | [260912-jlt](./quick/260912-jlt-vendor-forked-ts-mls-into-published-pack/) · Build vendors the ts-mls fork into dist/vendor/ts-mls (no npm ts-mls dep); tarball verifier + fork-publish guard; npm-tarball smoke CI on Node/Bun/Deno (56cce59, ef2ab76, c3c242c) | 2026-09-12 | — | — | — |
+| 261005-exf | Shorten AGENTS.md contributor guidelines | 2026-10-05 | c325d5f | — | [261005-exf-shorten-agents-md-contributor-guidelines](./quick/261005-exf-shorten-agents-md-contributor-guidelines/) |
 
 ## Deferred Items
 
