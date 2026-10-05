@@ -112,6 +112,7 @@ shelved audit/closure phases, 999.7 invite-only client mode; multi-device (MDEV-
 - ✓ GRP-01..04 GroupContext `app_components` requires `0x8009`, `0x8009` data in GroupContext rejected, enforced identically on create, invite, join, inbound, and convergence seams — v2.0 _(Validated in Phase 8: GroupContext Profile Requirement & Legality-Seam Extension)_
 - ✓ UPD-01..04 replacement-leaf identity binding (prior-occupant identity preserved, proof bound to the resulting signature key, `0x8009` non-removable from a non-blank leaf, standalone Update re-checked at admission) — v2.0 _(Validated in Phase 9: Self-Update / Replacement-Leaf Identity Binding)_
 - ✓ FOUND-01..05 founding group creation via Welcome only (internal founding Add Commit never published, Welcome-only invitee join, per-invitee retryable ack-aware delivery, fail-closed relay-less founding create) — v2.0 _(Validated in Phase 10: Founding Group Creation via Welcome)_
+- ✓ QA-04 / QA-05 full suite green on Node 20/22/24, Deno 2, Bun latest/1.1 (CI run 37328779021 on c2f5a12) and exports snapshot reflects the `0x8009` cutover with `0xf2f1` only in the CUT-02 keep set — v2.0 _(Validated in Phase 11: Exports Snapshot & QA Gate)_
 
 ### Active
 
@@ -124,6 +125,7 @@ shelved audit/closure phases, 999.7 invite-only client mode; multi-device (MDEV-
 - [x] GroupContext requires `0x8009`; profile enforced on every legality seam _(Phase 8)_
 - [x] Self-update / replacement-leaf identity and proof binding rules _(Phase 9)_
 - [x] Current-profile founding group creation via Welcome only _(Phase 10)_
+- [x] Exports snapshot and green six-runtime QA gate _(Phase 11)_
 
 ### Out of Scope
 
@@ -203,4 +205,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-_Last updated: 2026-09-28 — Phase 10 (Founding Group Creation via Welcome) complete_
+_Last updated: 2026-10-05 — Phase 11 (Exports Snapshot & QA Gate) complete; all v2.0 phases done_
