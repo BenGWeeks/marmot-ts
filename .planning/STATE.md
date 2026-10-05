@@ -2,44 +2,42 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Account identity proof v2
-current_phase: 999.1
-current_phase_name: BACKLOG
-status: completed
-stopped_at: Phase 11 (Exports Snapshot & QA Gate) complete — all v2.0 phases done
-last_updated: "2026-10-05T15:21:46.632Z"
+current_phase: 0
+status: Awaiting next milestone
+stopped_at: v2.0 milestone archived 2026-10-05; next is /gsd-new-milestone
+last_updated: "2026-10-05T15:38:57.487Z"
 last_activity: 2026-10-05
-last_activity_desc: Phase 11 complete, transitioned to Phase 999.1
+last_activity_desc: Milestone v2.0 completed and archived
 progress:
   total_phases: 6
   completed_phases: 6
   total_plans: 27
   completed_plans: 27
   percent: 100
+current_phase_name: BACKLOG
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-09-11)
+See: .planning/PROJECT.md (updated 2026-10-05)
 
 **Core value:** A downstream client can join a Marmot group and exchange messages that interoperate, byte-for-byte, with any spec-conformant peer (incl. the Rust MDK reference), across every supported runtime.
-**Current focus:** v2.0 milestone audit — Phase 11 (Exports Snapshot & QA Gate) complete; all 6 phases done
+**Current focus:** Planning next milestone (`/gsd-new-milestone`); v2.0 shipped 2026-10-05
 
 ## Current Position
 
-Phase: 999.1 — Group image support — check and add so downstream apps can show and update the group image (BACKLOG)
-Plan: Not started
-Status: v2.0 phases complete — next: /gsd-audit-milestone, then /gsd-complete-milestone
-Last activity: 2026-10-05 — Phase 11 complete, transitioned to Phase 999.1
-
-Progress: [██████████] 100%
+Phase: Milestone v2.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-10-05 — Milestone v2.0 completed and archived
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 76
+- Total plans completed: 80
 - Average duration: —
 - Total execution time: 0 hours
 
@@ -56,7 +54,7 @@ Progress: [██████████] 100%
 | 05 | 8 | - | - |
 | 06 | 1 | - | - |
 | 07 | 8 | - | - |
-| 08 | 0 | - | - |
+| 08 | 4 | - | - |
 | 09 | 4 | - | - |
 | 10 | 7 | - | - |
 | 11 | 3 | - | - |
@@ -141,153 +139,8 @@ _Updated after each plan completion_
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
-
-- Prior v1.0 phases (Exhaustive Gap Audit → Blocker & Security Closure → Wire/Conformance & Docs → Quality Gate) were shelved to the backlog (999.3–999.6); v1.0 was repurposed as "catchup" and the phase sequence restarted at Phase 1
-- Catchup review is done (`.planning/research/SUMMARY.md` + PROOF-V2/SPEC-DELTAS/MDK-INTEROP); roadmap derived directly from its 13 v1 requirements — interop-breakers close first (Phase 1–2), then commit-integrity/convergence parity (Phase 3, CONV-04 verify-first), then feature parity + MDK vectors (Phase 4), then the quality gate (Phase 5)
-- REQUIREMENTS.md traceability footer corrected from "12 total" to "13 total" — the itemized requirement list (PROOF-01, SEC-01, WIRE-01..04, CONV-01..04, CONF-01, QA-01, QA-02) was always 13; the summary count was a stale undercount
-- [Phase 01]: Widened AccountIdentityProofSigner to a union (plain digest function | { signEvent } object) to preserve raw-key compatibility while adding external-signer parity for account-identity-proof v2
-- [Phase 01]: mlsSignatureScheme() table already matched Rust ciphersuite.signature_algorithm() as u16 for all 7 ciphersuites; only decimal annotations added
-- [Phase 01]: Task 1/2 of plan 01-02 required no code changes: 01-01's core v2 migration already made client re-exporters and all 7 proof-touching test files v2-correct; only a stale .v1 JSDoc needed fixing
-- [Phase 01]: Generated a fresh Rust-signed proof-v2 round-trip fixture from refs/mdk cgka-engine via a throwaway, reverted test; pinned in darkmatter-invite-compat.test.ts, closing PROOF-01
-- [Phase 02]: Kept createThreeMonthLifetime as a deprecated alias re-export of createDefaultKeyPackageLifetime rather than a hard rename, per CONTEXT's Claude's Discretion
-- [Phase 02]: Cap enforcement lives entirely in marmot-ts (isLifetimeWithinCap + a throw guard in generateKeyPackage) rather than ts-mls's LifetimeConfig.maximumTotalLifetime, which is dead code in rc.14
-- [Phase 02]: getTagValue in src/utils/nostr.ts left byte-for-byte untouched; new strict getters live in a new sibling module src/utils/tag-cardinality.ts
-- [Phase ?]: [Phase 02]: Added safeVerifyEvent() to verify.ts after discovering applesauce's verifyEvent throws (rather than returning false) on a malformed event whose getEventHash/serializeEvent call is outside its own try/catch; wrapped at both the 445 drain and 1059 ingest gates
-- [Phase ?]: [Phase 02]: Relaxed getSingletonTagValue/getListTag from a NostrEvent-only signature to a generic <T extends { tags: string[][] }> bound (mirroring getTagValue) so the 444 welcome-rumor's unsigned Rumor callers compile
-- [Phase ?]: [Phase 02]: Deferred verifyEvent threading into GroupsManager/InviteManager constructor calls in marmot-client.ts from plan 02-02 Task 1 to Tasks 2/3 respectively, keeping each task's own pnpm compile green
-- [Phase ?]: Placed createInviteIntent trust-boundary tests in the existing invite.test.ts rather than key-package-manager.test.ts, matching this codebase's colocated-test convention
-- [Phase ?]: track()'s cardinality gate reuses the validated i tag value as the addPublished ref, replacing the prior getKeyPackageReference() read (a migration, not new wiring)
-- [Phase ?]: evaluateKeyPackageForGroup reuses the already-decoded keyPackage.leafNode.lifetime rather than re-calling getKeyPackageLifetime, avoiding a redundant decode
-- [Phase ?]: [Phase 02]: Introduced an object-identity-keyed rejectedEvents Set alongside the trusted-only id-keyed seen Set in GroupsManager#connectGroup's drain, to close WR-01 (same-id forgery censorship) without regressing existing single-rejection tests under MockNetwork's backfill+subscribe replay of the same malformed event object
-- [Phase ?]: requiredIds for validateAppComponentIntegrity MUST be derived from the CURRENT (pre-commit) extensions, never resulting, closing the Pitfall 2 re-derivation bug (mdk#707 class)
-- [Phase ?]: validateAdminLeafCoupling evaluates the carried-forward admin set when resulting extensions carry no admin-policy bytes, per Pitfall 3, and deliberately has no SelfRemove carve-out per Pitfall 4
-- [Phase ?]: Declared RejectedIngestResult.reason as an inline literal union in src/engine/types.ts rather than importing from src/core/components/integrity.ts, keeping plan 03-02 independent of sibling plan 03-01 per its explicit instruction
-- [Phase ?]: group-engine.ts's #emitIngestOutcome (audit emission) guards on stateInvalidated and returns early rather than fabricating an audit msg_id from a non-existent envelope; audit wiring for this variant is deferred to a later seam-wiring plan
-- [Phase 03]: CONV-04 verify-first found Assumption A1 falsified for D-16 property 1 (ForkRecovery could not replay a device's own already-applied commit); fixed narrowly by reusing RetainedHistoryStore's already-known resulting state instead of replaying via processMessage, without porting MDK's PrevalidatedOwnCommits stamping machinery
-- [Phase 03]: tree-convergence.ts's buildTreeBranchSet needed no change for CONV-04 -- it is structural (reads already-recorded commitDigest/epoch metadata) and never replays via processMessage, so it never shared the own-commit-reprocessing bug
-- [Phase ?]: [Phase 03-04]: withCapturedProposals is a pure decorator around IncomingMessageCallback; createAdminCommitPolicyCallback body is byte-for-byte unchanged (verified via git diff --unified=0)
-- [Phase ?]: [Phase 03-04]: Both ingest.ts and fork-recovery.ts call validateCommitLegality directly with (parentState, resultingState, proposals) rather than re-deriving requiredIds/resultingMemberAccounts locally, so neither seam can drift from the shared adapter
-- [Phase ?]: [Phase 03-04]: fork-recovery.ts's WIRE-03/CONV-01 gate applies only to the processMessage replay branch, not the knownNextStates (CONV-04) own-commit branch, since those commits already passed a legality gate the first time they were applied
-- [Phase ?]: [Phase 03-04]: Did not mark WIRE-03/CONV-01 complete in REQUIREMENTS.md -- the send seam (plan 03-05) is the third and final seam, per explicit instruction
-- [Phase ?]: [Phase 03-05]: Auto-coupling and the D-07 depletion guard live in #sendInner's case commit, never in proposeRemoveUser -- send() must catch every removal proposal landing in the commit, including unapplied proposals bundled by reference
-- [Phase ?]: [Phase 03-05]: Tree-fed re-convergence test fixtures must replay a competing committer's raw commits through a third party's own state before recordEdge -- recording the committer's own createCommit result directly hits ts-mls's RFC 9420 own-commit-replay constraint on later replay
-- [Phase ?]: [Phase 03-06]: D-13 self-evicted short-circuit is the first statement in ingestEnvelopes, ahead of even the retry-count check, so both fresh batches and internal retry recursion are covered uniformly
-- [Phase ?]: [Phase 03-06]: AppliedForkResolution gained tipCommitMessage so a rewind-landed removal attributes its selfRemoved notification to the winning chain's own tip commit, not an arbitrary forkPool entry
-- [Phase ?]: [Phase 03-06]: removedMarkerStore is a sibling GenericKeyValueStore<boolean> keyed by group-id hex, never grafted onto serialized ClientState; #realizeRemovalIfNeeded is the single idempotent funnel shared by fromClientState (load) and the ingest removed branch
-- [Phase ?]: [Phase 03-06]: Did not thread removedMarkerStore through GroupRegistry/GroupFactory/GroupsManager options -- checked every MarmotGroup construction site and found no load-time realization gap (fromClientState is the only loader path); logged as a deferred item
-- [Phase ?]: [Phase 03-06]: Loosened a third toHaveLength(1) rejection-count assertion beyond the two the plan named, since MockNetwork's subscription() replay-on-subscribe produces the same backfill-then-subscribe double delivery the plan itself documents as an accepted consequence
-- [Phase ?]: Tasks 1+2 combined into one commit for 03-07 (mutually-dependent interfaces cannot compile independently)
-- [Phase ?]: 03-07: extended notification derivation to the forkPool rewind site's own winning commit (Rule 2), not just the direct branch, so a rewind-landed commit can itself be superseded later
-- [Phase ?]: 03-07: CONV-03 marker-clearing tested at the MarmotGroup wiring boundary; a fully organic removed-then-un-removed engine scenario is currently unreachable due to ForkRecovery's confirmationTag-based candidate dedup and the direct removal branch skipping tree/retained recording (logged in deferred-items.md)
-- [Phase ?]: [Phase 03-08]: Treat the user-restored pnpm-lock.yaml hash as authoritative and verify it after every pnpm command.
-- [Phase ?]: [Phase 03-08]: Existing validateCommitLegality suites provide executable WIRE-03/CONV-01 evidence without production edits.
-- [Phase ?]: [Phase 03-09]: Persisted removal realization is invoked by GroupRegistry only after lifecycle forwarding listeners attach.
-- [Phase ?]: [Phase 03-09]: Local confirmed notifications travel on GroupPublishResult and are attributed from encoded MLS commit bytes.
-- [Phase ?]: [Phase 03-10]: Retain each applied commit as an exact parent/message/resulting-state link instead of reconstructing own links from digest plus epoch lookups.
-- [Phase ?]: [Phase 03-10]: Refresh the preceding retained link when its resulting epoch becomes the next commit parent, preserving staged proposal-reference evidence.
-- [Phase ?]: [Phase 03-11]: Keep unapplied proposals as MLS references and add only true caller/coupled proposals by value.
-- [Phase ?]: [Phase 03-11]: Run the shared admin callback over one normalized outbound proposal-with-sender union before createCommit.
-- [Phase ?]: [Phase 03.1]: Keep GroupRegistry.load hydration-only and activate persisted forks only after registry listeners attach.
-- [Phase ?]: [Phase 03.1]: Serialize the complete removal-realization transaction with a retry-safe instance-owned Promise.
-- [Phase ?]: [Phase 03.1-04]: Outbound commit authorization is a pure typed core decision over the exact proposal union, with actor identity derived from the local MLS leaf.
-- [Phase ?]: [Phase 03.1-04]: Malformed basic credentials are skipped uniformly by all member enumeration helpers while valid siblings remain visible.
-- [Phase ?]: [Phase 03.1-02]: Model post-confirm persistence and Welcome failures as independent discriminated GroupPublishResult outcomes.
-- [Phase ?]: [Phase 03.1-02]: Keep publishFailed exclusive to pre-confirm relay failures and mark acknowledged work retryPublication false.
-- [Phase ?]: Validate each delivery before consulting rejected-id history so bounded caches cannot censor a later valid same-id event.
-- [Phase ?]: Store removal realization only under the group-scoped groupId/removed key.
-- [Phase ?]: 03.1-03: Applied state changes use a named envelope-less ingest result rather than extending autoCommit or SendResult.
-- [Phase ?]: 03.1-03: Winner-chain notifications are grouped by commit digest and emitted before withdrawals.
-- [Phase ?]: Plan 03.1-05 keys payload records by branch state and exact MLS message identity for deterministic, idempotent withdrawal.
-- [Phase ?]: Plan 03.1-05 prunes ledgers at min(retained anchor, oldest tree-node epoch); an unpruned tree intentionally implies unbounded retention.
-- [Phase ?]: [Phase 03.1-07]: CommitLegalityError retains the complete structured violation; inbound audit reasons normalize the exact typed reason to underscore form.
-- [Phase ?]: [Phase 03.1-09]: Derive every session ingest variant from the engine union and rename only envelope to event at the Nostr boundary.
-- [Phase ?]: [Phase 03.1-09]: Keep getGroupMembers as a deprecated alias while making getGroupMemberPubkeys canonical for production callers.
-- [Phase ?]: [Phase 03.1-09]: Preserve the existing removed-state send guard and regression-pin it as the D-12 lifecycle disposition.
-- [Phase ?]: [Phase 03.1-10]: Wrap commit envelopes before PendingPublish and terminate post-acknowledgement Merging in finally.
-- [Phase ?]: [Phase 03.1-10]: Project confirmation bookkeeping errors as typed persistence failures without republication.
-- [Phase ?]: [Phase 03.1-10]: Emit local historyChanged only after confirmation grows the tree.
-- [Phase ?]: [Phase 03.1-10]: Delete groupId/removed before shared serialized state and omit obsolete bare rewind deletion.
-- [Phase ?]: [Phase 03.1-08]: Expose only engine symbols named by root public signatures while keeping unrelated internals on ./engine.
-- [Phase ?]: [Phase 03.1-08]: Pin BoundedIdCache, decideCommitAuthorization, and getGroupMemberPubkeys as intended root runtime API.
-- [Phase ?]: [Phase 03.1-11]: Keep the D-16 citation gate scoped to the exact ten-file Phase-3-touched manifest.
-- [Phase ?]: [Phase 03.1-11]: Map Welcome rotation citations to protocol-core/joining.md and admin/commit citations to protocol-core/group-messaging.md.
-- [Phase ?]: Complete auto-commit publication and confirmation or rollback before yielding autoCommit to the consumer.
-- [Phase ?]: Retain confirmed notifications locally so successful delivery remains autoCommit followed immediately by appliedNotifications.
-- [Phase ?]: [Phase 03.1-14]: Route publishEffects and legacy publishProposal through one proposal result helper so acknowledgement semantics cannot drift.
-- [Phase ?]: [Phase 03.1-14]: Invoke publishFailed only before relay acknowledgement; confirmation and persistence failures remain inspectable and non-retryable afterward.
-- [Phase ?]: [Phase 03.1-13]: Failed activation cleanup is guarded by exact group and listener identity before cache eviction.
-- [Phase ?]: [Phase 03.1-13]: Durable removal completes internal cancellation before independently isolated application callbacks.
-- [Phase ?]: [Phase 04-01]: Encode SafeAAD's empty supported-component set as canonical 00, matching MDK.
-- [Phase ?]: [Phase 04-01]: Reject SafeAAD in the GroupContext dictionary builder while allowing it through the dedicated leaf builder.
-- [Phase ?]: [Phase 04-01]: Statically import pinned MDK JSON fixtures in test-only code for cross-runtime fixture reuse.
-- [Phase ?]: [Phase 04-02]: Keep own-commit record identity bound to exact MLS wire bytes; stamped metadata never changes identity.
-- [Phase ?]: [Phase 04-02]: Only confirmation-stamped own links receive prevalidated recovery; legacy records remain readable without inferred evidence.
-- [Phase ?]: [Phase 04-03]: Retain peeled deferred commits by their MLS-authenticated source epoch; opaque wrappers remain capacity-bounded without inventing an epoch.
-- [Phase ?]: [Phase 04-03]: Capacity pressure refuses new work without evicting accepted entries or creating a terminal dedup disposition.
-- [Phase ?]: [Phase 04-03]: Resolve parent authentication, authorization, and component legality through one discriminated result contract in both recovery seams.
-- [Phase ?]: [Phase 04-04]: Resolve an omitted ingestStateStore once per MarmotClient and share that explicitly ephemeral store across every constructed group.
-- [Phase ?]: [Phase 04-04]: Use the producing commit digest as both revalidation identity and durable effect-ledger key.
-- [Phase ?]: [Phase 04-05]: Use performance.now as the default monotonic clock and sample it once when a convergence pass opens.
-- [Phase ?]: [Phase 04-05]: Give the fairness slot only to commit intents already queued at settlement; reuse the engine authorization seam.
-- [Phase ?]: [Phase 04-06]: Only scenario_vector records expose loadable root-contained artifacts; other upstream manifest records remain strict inventory.
-- [Phase ?]: [Phase 04-06]: Canonical snapshots hash public GroupContext encoder bytes and a domain-separated MLS exporter commitment.
-- [Phase ?]: Portable Scenario IR operations outside the adapter surface remain explicit capability results under immutable MDK ids.
-- [Phase ?]: Extended offline cases 6-23 are isolated from root Vitest discovery for Phase 5 matrix execution.
-- [Phase ?]: Represent protocol lifecycle with a named const object and literal union, not a TypeScript enum.
-- [Phase ?]: Seed lifecycle-v1 in createGroup while treating absent lifecycle bytes as valid legacy state.
-- [Phase ?]: [Phase 04.1-02]: Carry authenticated committer leaf metadata beside decoded proposals so every legality seam uses the same parent-relative classifier.
-- [Phase ?]: [Phase 04.1-02]: Persist one versioned request at groupId/disband/request and hydrate it before engine send or ingest work.
-- [Phase ?]: [Phase 04.1-02]: Keep Disbanding as a typed non-canonical outbound gate while canonical lifecycle remains independently managed.
-- [Phase ?]: [Phase 04.1-03]: Resolve an omitted lifecycleStore once as a disband-key-scoped adapter over durable groupStateStore.
-- [Phase ?]: [Phase 04.1-03]: Relay acknowledgement retains the pending request; canonical selection and regeneration remain scheduler-owned.
-- [Phase ?]: [Phase 04.1-04]: Carry terminal evidence beside BranchCandidate scoring and consult it only after the unchanged comparator selects a winner.
-- [Phase ?]: [Phase 04.1-04]: Interpret removed-receiver parent-shaped ts-mls tombstones from authenticated inline proposal bytes and logical edge depth.
-- [Phase ?]: [Phase 04.1-05]: Terminal and request records share one lifecycle store but use independent versioned group-scoped namespaces.
-- [Phase ?]: [Phase 04.1-05]: The tombstone write is terminal authority; cleanup is idempotent and resumes on hydration.
-- [Phase ?]: [Phase 04.1-05]: Registry listeners attach before lifecycle hydration and public loaded visibility waits for cleanup.
-- [Phase ?]: [Phase 04.1-06]: Record terminal notification delivery before isolated actor/digest callbacks.
-- [Phase ?]: [Phase 04.1-06]: Repeat disband gates at routing, session, and engine boundaries while keeping Unrecoverable repairable.
-- [Phase ?]: [Phase 05-01]: Treat local Node 22, Deno 2, and Bun latest executions as smoke evidence only; the complete six-row CI matrix remains release authority.
-- [Phase ?]: [Phase 05-01]: Record local pnpm 12.3.4 honestly while retaining pnpm 10 plus frozen-lockfile installation as the CI contract.
-- [Phase ?]: [Phase 05-02]: Use deterministic k256 prehash signing for byte-stable MDK proof-v2 fixtures.
-- [Phase ?]: [Phase 05-02]: Distinguish the legacy version-byte-2 fixture from MDK's current 0x8009 component profile.
-- [Phase ?]: [Phase 05-03]: Inject every KeyPackage randomness source and fixed validation time so complete MDK MLS frames are byte-stable.
-- [Phase ?]: [Phase 05-03]: Record signed capability advertisements separately from RFC-default effective support after b4649c01.
-- [Phase ?]: [Phase 05-04]: Use MDK only as the kind-30443 producer oracle; source every inbound rejection row to the Marmot transport specification.
-- [Phase ?]: [Phase 05-04]: Match MDK's complete required-tag order by placing the i tag before ciphersuite and list advertisements.
-- [Phase ?]: [Phase 05-05]: Extract SafeAAD only from genuine current-profile MDK Engine::fresh_key_package wire output.
-- [Phase ?]: [Phase 05-05]: Use an exact SafeAAD-entry projection because current account-proof timestamp/signature bytes are nondeterministic.
-- [Phase ?]: Bind all QA-02 dossiers to tested source b937e3f while recording attestation 172eb0a separately.
-- [Phase ?]: Verify Marmot and MDK provenance with git ls-tree at tested_source_sha.
-- [Phase 06]: [Phase 06-01]: Declared all 14 AuthorizationProofError reject reasons in Task 1, before the 8 returned-* reasons are thrown by Task 2, per the plan's explicit sequencing
-- [Phase 06]: [Phase 06-01]: produceAuthorizationProof re-validates the signer's returned event as unknown at runtime rather than trusting the declared EventSigner return type, so a non-object/null return is caught as returned-event-malformed
-- [Phase 06]: [Phase 06-01]: Added deno.lock to .gitignore (generated by the local Deno smoke run), matching the existing package-lock.json exclusion since pnpm is this workspace's lockfile
-- [Phase ?]: [Phase 07-01]: Attached only PROOF-02 to requirements.mark-complete -- PROOF-04/05/06 and CUT-02 are also declared on 07-06 frontmatter (seam-wiring plan) and stay Pending in REQUIREMENTS.md until that plan wires the validators into send/inbound/join seams
-- [Phase 07]: [Phase 07-02]: Kept the legacy accountProofSigner option/import in core/key-package.ts (effectiveProofSigner = signer ?? accountProofSigner) until 07-06 removes it and switches the leaf format atomically with the verifier seams
-- [Phase 07]: [Phase 07-02]: Fixed src/__tests__/groups-manager.test.ts's ADMIN fixture (getPublicKey-only signer stub -> testAccount(0)) because GroupsManager.create() now always threads the identity signer into generateKeyPackage, requiring a real signEvent
-- [Phase 07]: [Phase 07-03]: Used the plan's default order-preserving slot mapping throughout all 17 engine test files (a->6, d->9, e->11, 2->0, 3->1), needing no new slot choices
-- [Phase 07]: [Phase 07-03]: createTestGroupState (group-engine.test.ts) retyped to take a PrivateKeyAccount directly rather than a bare pubkey string, per migration rule 6
-- [Phase 07]: [Phase 07-03]: Replaced two getPublicKey-only EventSigner stubs with the matching testAccount's real signer, since they stood for an identity already migrated elsewhere in the same fixture
-- [Phase ?]: [Phase 07-04]: Updated key-package.test.ts's default-capabilities test to expect 2 leaf extensions (was 1) since every call now carries a real signer (D-02), always emitting the account-identity-proof extension alongside app_data_dictionary
-- [Phase ?]: [Phase 07-05]: Left existing getPublicKey-only EventSigner stubs untouched beyond swapping the underlying literal for the derived account pubkey -- those represent the local client's own identity for message-signing paths this plan does not touch, not the generateKeyPackage credential signer
-- [Phase ?]: [Phase 07-06]: CUT-01 stays Pending -- its 'legacy proof exports are removed' clause is still false until plan 07-07 deletes src/core/account-identity-proof.ts; marked PROOF-04/05/06 and CUT-02 Complete since every seam behavior they describe is now reachable and tested
-- [Phase ?]: [Phase 07-06]: admin-policy's Add gate is a like-for-like swap only -- a proof-less Add is still skipped (KNOWN GAP D-06, transferred to Phase 8); legacy-only material is no longer skipped, it is validated and rejected (CUT-02)
-- [Phase 07]: [Phase 07-07]: Retired proof-v2-probe (Rust legacy fixture generator) in this plan rather than Phase 11, per RESEARCH Pitfall 2, so no template for the 0xf2f1 shape survives
-- [Phase 07]: [Phase 07-07]: admin-policy's D-06 known gap (proof-less Add skips the proof gate) is now pinned by a named test asserting the callback throws rather than rejects, transferred to Phase 8 GRP-02/GRP-04
-- [Phase ?]: [Phase 07-08]: Chose an optional ListedKeyPackage.nonCurrent listing field (Claude's Discretion per D-09), computed inline in KeyPackageStore.list() via validateKeyPackageAccountIdentityProof, rather than a separate query method
-- [Phase ?]: [Phase 07-08]: ensurePublished's selector change (!pkg.used && !pkg.nonCurrent) is the only production edit to that method -- create/rotate/remove/purge/selectForWelcome untouched, per the plan's explicit scope boundary
-- [Phase ?]: [Phase 08-01]: diffChangedLeaves reports the true MLS leaf index (nodeIndex/2), never validateGroupMemberAccountIdentityProofs's member-enumeration index
-- [Phase ?]: [Phase 08-01]: validateAddProposalAccountIdentityProofs left unwired in this plan (pure helper only); admin-policy.ts/group-engine.ts wiring is plan 08-02's D-08/D-09 scope
-- [Phase 08]: [Phase 08-02]: Merged ingest.ts's two withCapturedProposals wrappers (per-loop) into one shared instance declared before both the non-commit and commit loops, matching the decorator's own documented reuse contract
-- [Phase 08]: [Phase 08-02]: D-05's inbound-commit test uses an admin committer (admin2) to author the forged-Add commit, so it is rejected by the Add-proof check specifically rather than the pre-existing generic admin-policy path
-- [Phase 08]: [Phase 08-02]: Left GRP-02 Pending in REQUIREMENTS.md (only GRP-04 marked complete) -- the full seam-parity matrix GRP-02 requires is plan 08-04's explicit scope
-- [Phase ?]: [Phase 08-03]: GroupRegistry.track() guards both reconverge() and resumePendingDisband() with one profileSupported boolean, even though resumePendingDisband() already self-guards, per the plan's explicit instruction
-- [Phase ?]: [Phase 08-03]: Left GRP-02 unmarked in REQUIREMENTS.md -- its full seam-parity-matrix text is plan 08-04's explicit scope, matching the discretion 08-01/08-02 already exercised
-- [Phase 08]: [Phase 8-04]: Computed the proof-less-Add fixture's expected proofReason dynamically via validateKeyPackageAccountIdentityProof rather than hardcoding it, tracking the validator's own source of truth
-- [Phase 08]: [Phase 8-04]: Split each D-04 fixture into 4 independent send/inbound/replay/tree-fed it blocks rather than one combined test, satisfying Pitfall 3's warning sign and the plan's per-task test-count acceptance criteria
-- [Phase 08]: [Phase 8-04]: GRP-02 marked complete in REQUIREMENTS.md -- the seam-parity matrix plans 08-01/08-02/08-03 deliberately left it Pending for is now built and green
+Decisions are logged in PROJECT.md Key Decisions table. Per-plan decision logs for v1.0 and v2.0 live in
+the archived phase SUMMARY.md files (`milestones/v1.0-phases/`, `milestones/v2.0-phases/`).
 
 ### Pending Todos
 
@@ -295,10 +148,8 @@ None yet.
 
 ### Blockers/Concerns
 
-- [Resolved in 03-03]: CONV-04 verify-first ran; Assumption A1 was falsified for one of the two D-16 properties (own-commit replay) and fixed narrowly in `fork-recovery.ts` — see 03-03-SUMMARY.md "CONV-04 verdict"
-- Pre-existing (from 03-01): src/__tests__/exports.test.ts snapshot stale + pnpm lint fails on refs/mdk/target/ noise — logged in phase deferred-items.md, not fixed in 03-02
-- [Phase 09]: one unreproduced single-test failure during the fix pass (`1 failed | 1249 passed`), never identified (output was `tail`-truncated), not reproduced across 14 consecutive green runs. Not proven unrelated — see 09 deferred-items.md D-09-07
-- [Phase 09]: `resolveCandidateParent`'s replay branch still defers a non-member-sender commit forever (sibling of the fixed WR-02, which only covered `ingest.ts`) — see 09 deferred-items.md D-09-01. Fails closed on authorization, open on liveness; low-urgency because adopted v1 defines no legitimate non-member-sender commit path
+- [Phase 09]: one unreproduced single-test failure during the fix pass (`1 failed | 1249 passed`), never identified (output was `tail`-truncated), not reproduced across 14 consecutive green runs. Not proven unrelated — see `milestones/v2.0-phases/09-self-update-replacement-leaf-identity-binding/deferred-items.md` D-09-07
+- [Phase 09]: `resolveCandidateParent`'s replay branch still defers a non-member-sender commit forever (sibling of the fixed WR-02, which only covered `ingest.ts`) — see `milestones/v2.0-phases/09-self-update-replacement-leaf-identity-binding/deferred-items.md` D-09-01. Fails closed on authorization, open on liveness; low-urgency because adopted v1 defines no legitimate non-member-sender commit path
 - [Phase 09]: CR-01's change from permanent-deferral to accept on the proposal-less convergence path is a design judgment tests cannot prove — owner sign-off suggested (D-09-08)
 
 ### Roadmap Evolution
@@ -306,6 +157,7 @@ None yet.
 - Phase 03.1 inserted after Phase 3: Phase 3 Review Closure - close round-3 findings as planned work (URGENT)
 - Phase 04.1 inserted after Phase 4: Terminal Group Disbanding - new marmot.group.lifecycle.v1 spec scope
 - v2.0 roadmap created 2026-09-12: Phases 6-11 derived from research SUMMARY.md's converged dependency order (envelope primitive → 0x8009 proof-class + 0xf2f1 clean cut → GroupContext + legality-seam extension → self-update binding → founding-create-via-Welcome → interop/QA gate); continues sequential phase numbering from v1.0's Phase 5; 28/28 v2.0 requirements mapped, no orphans
+- v2.0 shipped and archived 2026-10-05: audit re-scored `passed` after Phase 8 VERIFICATION.md (missing at audit) was produced at close; phases → `milestones/v2.0-phases/`, research → `milestones/v2.0-research/`
 
 ## Quick Tasks Completed
 
@@ -334,11 +186,13 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-10-05
-Stopped at: Phase 11 (Exports Snapshot & QA Gate) complete — verification passed 2/2; CI green on c2f5a12
-Resume file:
+Stopped at: v2.0 Account identity proof v2 completed and archived (verified_closeout)
+Resume file: None
 
-.planning/phases/11-exports-snapshot-qa-gate/11-CONTEXT.md
+- v2.0 tech debt to triage when scoping the next milestone: `milestones/v2.0-MILESTONE-AUDIT.md` `tech_debt`
+  and Phase 8 `08-VERIFICATION.md` W-01 (WR-01..03 fixes have no regression tests).
+- First step of the next milestone: re-check `refs/marmot` and `refs/mdk` for upstream changes.
 
-- Phase 9 shipped 4/4 plans in 4 sequential waves. Verification passed 4/4 roadmap success criteria and 8/8 must-haves. Code review found 1 Critical + 4 Warning; all fixed and committed, plus a promoted Info-severity positive-control test (the missing control was why the Critical shipped green). Suite: 111 files / 1250 tests.
-- Open items carried forward: `.planning/phases/09-self-update-replacement-leaf-identity-binding/deferred-items.md` (D-09-01 WR-02 replay-branch sibling, D-09-05 no coverage on WR-02's terminal branch, D-09-07 unreproduced flake, D-09-08 CR-01 contract sign-off).
-- Next: Phase 10 (Founding Group Creation via Welcome). Start with `/gsd-discuss-phase 10`.
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
