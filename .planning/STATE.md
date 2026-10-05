@@ -31,7 +31,7 @@ See: .planning/PROJECT.md (updated 2026-09-11)
 Phase: 11 (exports-snapshot-qa-gate) — EXECUTING
 Plan: 1 of 3
 Status: Executing Phase 11
-Last activity: 2026-09-30 — Completed quick task 260930-jj7: opentui NIP-42 relay auth fix (Phase 11 still awaiting 11-03 push checkpoint)
+Last activity: 2026-10-05 — Completed quick task 261005-dd6: mls_proposals GREASE parity with MDK (Phase 11 still awaiting 11-03 push checkpoint)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -317,6 +317,7 @@ None yet.
 | 2026-09-30 | [260930-gpe](./quick/260930-gpe-opentui-relay-list-guard-for-group-creat/) | OpenTUI relay-list guard: retry incomplete 10002/10050 discovery (+lookup relays), hide empty outbox choice on new group, gate KeyPackage publish/rotate on both lists (8943c0a..c1c2999) |
 | 2026-09-30 | [260930-jj7](./quick/260930-jj7-opentui-nip-42-relay-auth-fix-for-invite/) | OpenTUI NIP-42 on-demand relay auth (fixes auth-gated relays stalling invite KeyPackage lookups + gift-wraps); invite lookup hints LOOKUP_RELAYS, waitForAuth:false (4f2a8ee..3aa11ef) |
 | 2026-10-05 | fast: opentui-invite-loading | OpenTUI invite modal shows spinner + current lookup step while fetching invitee relays/KeyPackages (3217bf8) |
+| 2026-10-05 | [261005-dd6](./quick/261005-dd6-mls-proposals-keep-grease-decode-accepts/) | KeyPackage `mls_proposals` tag keeps GREASE (MDK exact-match parity); new `checkKeyPackageProposalsTag` accepts exact or GREASE-stripped match, enforced at createInviteIntent + eligibility (7b59a72..162239d) |
 | 2026-09-12 | [260912-jlt](./quick/260912-jlt-vendor-forked-ts-mls-into-published-pack/) | Build vendors the ts-mls fork into dist/vendor/ts-mls (no npm ts-mls dep); tarball verifier + fork-publish guard; npm-tarball smoke CI on Node/Bun/Deno (56cce59, ef2ab76, c3c242c) |
 
 ## Deferred Items
