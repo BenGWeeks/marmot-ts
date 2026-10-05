@@ -67,8 +67,8 @@ Per `protocol-core/joining.md` founding-creation exception and MDK `SendResult::
 
 ### Interop and quality (QA)
 
-- [ ] **QA-04**: The full suite is green on Node 20/22/24, Deno 2, and Bun latest/1.1
-- [ ] **QA-05**: The public exports snapshot reflects the removed legacy proof exports and the added envelope/component exports
+- [x] **QA-04**: The full suite is green on Node 20/22/24, Deno 2, and Bun latest/1.1
+- [x] **QA-05**: The public exports snapshot reflects the removed legacy proof exports and the added envelope/component exports
 
 ## Future Requirements
 
@@ -128,8 +128,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FOUND-03 | Phase 10 | Complete |
 | FOUND-04 | Phase 10 | Complete |
 | FOUND-05 | Phase 10 | Complete |
-| QA-04 | Phase 11 | Pending |
-| QA-05 | Phase 11 | Pending |
+| QA-04 | Phase 11 | Complete |
+| QA-05 | Phase 11 | Complete |
 
 **Coverage:**
 

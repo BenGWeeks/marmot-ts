@@ -34,7 +34,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 8: GroupContext Profile Requirement & Legality-Seam Extension** - `0x8009` required on every group and enforced identically across create, invite, join, inbound, and convergence seams (completed 2026-09-15)
 - [x] **Phase 9: Self-Update / Replacement-Leaf Identity Binding** - Leaf replacement preserves account identity and keeps the proof bound to the new signature key (completed 2026-09-24)
 - [x] **Phase 10: Founding Group Creation via Welcome** - Current-profile group creation merges the founding Add locally and delivers membership via independently-retryable Welcomes only (gap closure 10-05..10-07 pending, 2026-09-28) (completed 2026-09-28)
-- [ ] **Phase 11: Exports Snapshot & QA Gate** - Exports snapshot and a green six-runtime suite
+- [x] **Phase 11: Exports Snapshot & QA Gate** - Exports snapshot and a green six-runtime suite (completed 2026-10-05)
 
 ## Phase Details
 
@@ -225,7 +225,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 11-03-PLAN.md — QA gate: verify D-07/D-08/D-09, full local gate (lint, build, package smoke, Node/Deno/Bun suite + conformance), user push checkpoint, CI evidence for Node 20/22/24, Deno v2.x, Bun latest/1.1
+- [x] 11-03-PLAN.md — QA gate: verify D-07/D-08/D-09, full local gate (lint, build, package smoke, Node/Deno/Bun suite + conformance), user push checkpoint, CI evidence for Node 20/22/24, Deno v2.x, Bun latest/1.1
 
 ## Progress
 
@@ -246,7 +246,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 | 8. GroupContext Profile Requirement & Legality-Seam Ext.   | v2.0      | 4/4 | Complete   | 2026-09-15 |
 | 9. Self-Update / Replacement-Leaf Identity Binding         | v2.0      | 4/4 | Complete    | 2026-09-24 |
 | 10. Founding Group Creation via Welcome                    | v2.0      | 7/7 | Complete    | 2026-09-28 |
-| 11. Exports Snapshot & QA Gate                             | v2.0      | 2/3 | In Progress|  |
+| 11. Exports Snapshot & QA Gate                             | v2.0      | 3/3 | Complete    | 2026-10-05 |
 
 ## Backlog
 
@@ -254,7 +254,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 3.1 → 4 → 4.1 → 5 → 6
 
 **Goal:** [Captured for future planning] — verify group image (avatar) support end-to-end so downstream apps can read/display and update a group's image. Likely touches the group image/avatar-url (0x8007) extension and the group metadata surface.
 **Requirements:** TBD
-**Plans:** 7/7 plans complete
+**Plans:** 3/3 plans complete
 
 Plans:
 

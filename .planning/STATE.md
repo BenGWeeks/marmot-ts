@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Account identity proof v2
-current_phase: 11
-current_phase_name: exports-snapshot-qa-gate
-status: executing
-stopped_at: Phase 11 context gathered
-last_updated: "2026-09-28T22:54:00.956Z"
-last_activity: 2026-09-28
-last_activity_desc: Phase 11 execution started
+current_phase: 999.1
+current_phase_name: BACKLOG
+status: completed
+stopped_at: Phase 11 (Exports Snapshot & QA Gate) complete — all v2.0 phases done
+last_updated: "2026-10-05T15:21:46.632Z"
+last_activity: 2026-10-05
+last_activity_desc: Phase 11 complete, transitioned to Phase 999.1
 progress:
   total_phases: 6
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 27
-  completed_plans: 24
-  percent: 83
+  completed_plans: 27
+  percent: 100
 ---
 
 # Project State
@@ -24,22 +24,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-09-11)
 
 **Core value:** A downstream client can join a Marmot group and exchange messages that interoperate, byte-for-byte, with any spec-conformant peer (incl. the Rust MDK reference), across every supported runtime.
-**Current focus:** Phase 11 — Exports Snapshot & QA Gate (exports-snapshot-qa-gate)
+**Current focus:** v2.0 milestone audit — Phase 11 (Exports Snapshot & QA Gate) complete; all 6 phases done
 
 ## Current Position
 
-Phase: 11 (exports-snapshot-qa-gate) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 11
-Last activity: 2026-10-05 — Completed quick task 261005-dd6: mls_proposals GREASE parity with MDK (Phase 11 still awaiting 11-03 push checkpoint)
+Phase: 999.1 — Group image support — check and add so downstream apps can show and update the group image (BACKLOG)
+Plan: Not started
+Status: v2.0 phases complete — next: /gsd-audit-milestone, then /gsd-complete-milestone
+Last activity: 2026-10-05 — Phase 11 complete, transitioned to Phase 999.1
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 73
+- Total plans completed: 76
 - Average duration: —
 - Total execution time: 0 hours
 
@@ -59,7 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | 08 | 0 | - | - |
 | 09 | 4 | - | - |
 | 10 | 7 | - | - |
-| 11 | 0 | - | - |
+| 11 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -333,8 +333,8 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-09-28T21:57:05.810Z
-Stopped at: Phase 11 context gathered
+Last session: 2026-10-05
+Stopped at: Phase 11 (Exports Snapshot & QA Gate) complete — verification passed 2/2; CI green on c2f5a12
 Resume file:
 
 .planning/phases/11-exports-snapshot-qa-gate/11-CONTEXT.md
