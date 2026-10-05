@@ -10,7 +10,10 @@ import {
   getSingletonTagValue,
   TAG_CARDINALITY,
 } from "../../utils/tag-cardinality.js";
-import { createKeyPackageEvent } from "../key-package-event.js";
+import {
+  checkKeyPackageProposalsTag,
+  createKeyPackageEvent,
+} from "../key-package-event.js";
 import { KEY_PACKAGE_APP_COMPONENTS_TAG } from "../protocol.js";
 
 /**
@@ -40,16 +43,19 @@ type TagFixture = {
 
 const SLOT_ID = "a1".repeat(32);
 
-async function expectProductionTags(expectedTags: string[][]): Promise<void> {
+function decodeRustKeyPackage() {
   const message = decode(
     mlsMessageDecoder,
     hexToBytes(lifetimeFixture.lifetime.key_package_tls_hex),
   );
   if (!message || message.wireformat !== wireformats.mls_key_package)
     throw new Error("Rust fixture did not decode as an MLS KeyPackage");
+  return message.keyPackage;
+}
 
+async function expectProductionTags(expectedTags: string[][]): Promise<void> {
   const event = await createKeyPackageEvent({
-    keyPackage: message.keyPackage,
+    keyPackage: decodeRustKeyPackage(),
     identifier: SLOT_ID,
   });
   expect(event.tags).toEqual(expectedTags);
@@ -68,6 +74,12 @@ describe("MDK kind-30443 tag parity", () => {
     // the fixture tags with "0x8009" inserted into app_components immediately
     // before "0x800c" (PITFALLS 14).
     await expectProductionTags(withAccountIdentityProofTag(rust.tags));
+  });
+
+  it("the Rust fixture's mls_proposals tag is an exact match for its KeyPackage", () => {
+    expect(
+      checkKeyPackageProposalsTag({ tags: rust.tags }, decodeRustKeyPackage()),
+    ).toEqual({ kind: "match", mode: "exact" });
   });
 
   it("negative control rejects a mutated Rust oracle through production parity", async () => {
