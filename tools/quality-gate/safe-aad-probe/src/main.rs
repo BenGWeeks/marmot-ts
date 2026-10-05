@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use storage_sqlite::SqliteAccountStorage;
 use tls_codec::{Deserialize as _, Serialize as _};
 
-const MDK_SHA: &str = "dbf45c83a8e157302edd13010944ad2c6a9cf9a5";
+const MDK_SHA: &str = "798a3e07ede494d98c2ecf590c6e838a8c1dfcfe";
 const IDENTITY_SEED: &[u8] = b"marmot-ts genuine SafeAAD engine probe";
 
 struct DeterministicProofSigner(SigningKey);
@@ -79,6 +79,7 @@ impl TransportPeeler for ProbePeeler {
             sender: None,
             content: PeeledContent::Welcome {
                 bytes: msg.payload.clone(),
+                created_at: None,
             },
             origin: msg.clone(),
         })

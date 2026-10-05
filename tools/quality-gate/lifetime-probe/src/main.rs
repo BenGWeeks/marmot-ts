@@ -29,7 +29,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tls_codec::Serialize as _;
 
-const MDK_SHA: &str = "dbf45c83a8e157302edd13010944ad2c6a9cf9a5";
+const MDK_SHA: &str = "798a3e07ede494d98c2ecf590c6e838a8c1dfcfe";
 const VALIDATION_TIME: u64 = 1_788_718_800;
 const ACCEPTED_RANGE: u64 = 7_261_200;
 const ACCOUNT_SEED: &[u8] = b"marmot-ts lifetime fixture account";
