@@ -173,6 +173,7 @@ None yet.
 | 7 | [261005-dd6](./quick/261005-dd6-mls-proposals-keep-grease-decode-accepts/) · KeyPackage `mls_proposals` tag keeps GREASE (MDK exact-match parity); new `checkKeyPackageProposalsTag` accepts exact or GREASE-stripped match, enforced at createInviteIntent + eligibility (7b59a72..162239d) | 2026-10-05 | — | — | — |
 | 8 | [260912-jlt](./quick/260912-jlt-vendor-forked-ts-mls-into-published-pack/) · Build vendors the ts-mls fork into dist/vendor/ts-mls (no npm ts-mls dep); tarball verifier + fork-publish guard; npm-tarball smoke CI on Node/Bun/Deno (56cce59, ef2ab76, c3c242c) | 2026-09-12 | — | — | — |
 | 261005-exf | Shorten AGENTS.md contributor guidelines | 2026-10-05 | c325d5f | — | [261005-exf-shorten-agents-md-contributor-guidelines](./quick/261005-exf-shorten-agents-md-contributor-guidelines/) |
+| 2026-10-05 | [261005-f0d](./quick/261005-f0d-re-pin-quality-gate-rust-parity-probes-t/) | Re-pinned tools/quality-gate MDK parity probes dbf45c83 → 798a3e07 (client_name/created_at API drift, Cargo.lock refresh); fixtures byte-identical except mdk_sha; 3 parity files 67/67 green (dbeaed2, 775e56b) |
 
 ## Deferred Items
 
