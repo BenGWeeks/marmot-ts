@@ -316,6 +316,7 @@ None yet.
 | 2026-09-12 | [260912-dph](./quick/260912-dph-add-nip-05-resolution-to-the-opentui-gro/) | Added NIP-05 invite resolution with DNS relay hints and focused OpenTUI tests |
 | 2026-09-30 | [260930-gpe](./quick/260930-gpe-opentui-relay-list-guard-for-group-creat/) | OpenTUI relay-list guard: retry incomplete 10002/10050 discovery (+lookup relays), hide empty outbox choice on new group, gate KeyPackage publish/rotate on both lists (8943c0a..c1c2999) |
 | 2026-09-30 | [260930-jj7](./quick/260930-jj7-opentui-nip-42-relay-auth-fix-for-invite/) | OpenTUI NIP-42 on-demand relay auth (fixes auth-gated relays stalling invite KeyPackage lookups + gift-wraps); invite lookup hints LOOKUP_RELAYS, waitForAuth:false (4f2a8ee..3aa11ef) |
+| 2026-10-05 | fast: opentui-invite-loading | OpenTUI invite modal shows spinner + current lookup step while fetching invitee relays/KeyPackages (3217bf8) |
 | 2026-09-12 | [260912-jlt](./quick/260912-jlt-vendor-forked-ts-mls-into-published-pack/) | Build vendors the ts-mls fork into dist/vendor/ts-mls (no npm ts-mls dep); tarball verifier + fork-publish guard; npm-tarball smoke CI on Node/Bun/Deno (56cce59, ef2ab76, c3c242c) |
 
 ## Deferred Items
