@@ -3,11 +3,11 @@ gsd_state_version: "1.0"
 milestone: v2.0
 current_phase_name: between milestones
 status: Awaiting next milestone
-stopped_at: Planning cleanup for npm v0.6.0 complete
-last_updated: "2026-10-07T20:53:46.105Z"
+stopped_at: Planning cleanup complete
+last_updated: "2026-10-07T21:06:15.173Z"
 last_activity: 2026-10-07
-last_activity_desc: Archived planning history and reconciled release follow-ups
-state_head: 3928af03c42c41aaead17a99c81a63418d4d7e6b
+last_activity_desc: Removed completed planning history; retained backlog and follow-ups
+state_head: bc32282
 milestone_name: Account identity proof v2
 progress:
   total_phases: 6
@@ -29,32 +29,32 @@ The npm release being prepared is v0.6.0; no next milestone is active.
 Phase: None — between milestones
 Plan: None
 Status: Awaiting next milestone
-Last activity: 2026-10-07 — Cleaned planning artifacts for npm v0.6.0
+Last activity: 2026-10-07 — Compressed completed planning history
 
 ## Accumulated Context
 
 ### Decisions
 
-Preserve historical evidence in [archive](archive/pre-v0.6.0/README.md).
-Keep unresolved findings visible in [release follow-ups](archive/pre-v0.6.0/RELEASE-FOLLOWUPS.md).
+Keep concise milestone summaries; discard completed workflow artifacts.
+Keep unresolved findings visible in [release follow-ups](RELEASE-FOLLOWUPS.md).
 Planning cleanup does not certify code fixes or release readiness.
 
 ### Pending Todos
 
-No active todos. Historical backlog remains archived for re-scoping.
+No active todos. Backlog candidates remain in [BACKLOG.md](BACKLOG.md) for re-scoping.
 
 ### Blockers/Concerns
 
 Release findings still require disposition; see the carried follow-ups above.
-Current GSD audits do not scan this relocated archive automatically.
+Historical workflow artifacts have been removed; unresolved findings remain above.
 
 ## Quick Tasks Completed
 
-- 2026-10-07 — 261007-m2r: Consolidated changesets into Unreleased and removed Changesets tooling; build, package smoke, release guards, formatting, and pnpm 10 lockfile checks passed.
+Previous completed task artifacts have been removed.
 
 | # | Description | Date | Commit | Status | Directory |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Clean planning artifacts for npm v0.6.0; evidence in archive/pre-v0.6.0/quick/261007-m1f-clean-planning-artifacts-for-v0-6-releas | 2026-10-07 | 3928af0 | complete | — |
+| 261007-mb1 | Remove completed planning artifacts | 2026-10-07 | — | complete | [261007-mb1-compress-completed-milestones-and-clean-](./quick/261007-mb1-compress-completed-milestones-and-clean-/) |
 
 ## Session Continuity
 

@@ -20,7 +20,7 @@ correctly, across every supported runtime.
 ## Current State
 
 **v2.0 Account identity proof v2 — shipped 2026-10-05** (phases 6–11, 27 plans, 27/27 requirements).
-See `.planning/MILESTONES.md` and `.planning/archive/pre-v0.6.0/milestones/v2.0-ROADMAP.md`.
+See `.planning/MILESTONES.md` and [milestone summary](MILESTONES.md).
 
 marmot-ts now speaks the adopted Current profile: KeyPackages and leaves carry the
 `marmot.member.account-identity-proof.v2` component `0x8009` (104-byte `MarmotAuthorizationProof`,
@@ -42,7 +42,7 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
 - Backlog 999.1 group image support, 999.2 docs review ahead of the next release, 999.7 invite-only
   client mode (no KeyPackage identifier)
 - Shelved 999.3–999.6 audit/closure phases (re-scope against current refs first)
-- v2.0 tech debt from `archive/pre-v0.6.0/milestones/v2.0-MILESTONE-AUDIT.md`: regression tests for Phase 8 WR-01..03,
+- v2.0 tech debt from the archived v2.0 audit (see [release follow-ups](RELEASE-FOLLOWUPS.md)): regression tests for Phase 8 WR-01..03,
   Phase 10 WR-06 foundingAdd TOCTOU, Phase 11 export-guard gaps (PUBLIC_SURFACES ↔ package.json exports)
 - Deferred tracks: multi-device (MDEV-01), push (PUSH-01) — both reuse the `MarmotAuthorizationProof` primitive
 
@@ -114,7 +114,7 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
   53 plans); v2.0 touched 138 `src/` files (+19.3k / −2.1k, 27 plans).
 - Known technical debt:
   - `maxRewindCommits: Infinity` remains memory-unbounded until `GroupHistoryTree` pruning lands (v1.0)
-  - v2.0 items listed in `archive/pre-v0.6.0/milestones/v2.0-MILESTONE-AUDIT.md` (untested Phase 8 review fixes, Phase 10
+  - v2.0 items listed in the archived v2.0 audit (see [release follow-ups](RELEASE-FOLLOWUPS.md)) (untested Phase 8 review fixes, Phase 10
     foundingAdd TOCTOU and retry reentrancy, Phase 11 export-guard gaps, `0x8002`/`0x8008`/`0x800b`
     accepted as opaque — looser than MDK)
   - Accepted/deferred review items are recorded in the phase `deferred-items.md` files
