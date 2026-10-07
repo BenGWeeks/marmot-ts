@@ -50,6 +50,8 @@ Current GSD audits do not scan this relocated archive automatically.
 
 ## Quick Tasks Completed
 
+- 2026-10-07 — 261007-m2r: Consolidated changesets into Unreleased and removed Changesets tooling; build, package smoke, release guards, formatting, and pnpm 10 lockfile checks passed.
+
 | # | Description | Date | Commit | Status | Directory |
 | --- | --- | --- | --- | --- | --- |
 | 1 | Clean planning artifacts for npm v0.6.0; evidence in archive/pre-v0.6.0/quick/261007-m1f-clean-planning-artifacts-for-v0-6-releas | 2026-10-07 | 3928af0 | complete | — |
