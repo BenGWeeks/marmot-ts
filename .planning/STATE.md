@@ -50,11 +50,8 @@ Historical workflow artifacts have been removed; unresolved findings remain abov
 
 ## Quick Tasks Completed
 
-Previous completed task artifacts have been removed.
-
-| # | Description | Date | Commit | Status | Directory |
-| --- | --- | --- | --- | --- | --- |
-| 261007-mb1 | Remove completed planning artifacts | 2026-10-07 | — | complete | [261007-mb1-compress-completed-milestones-and-clean-](./quick/261007-mb1-compress-completed-milestones-and-clean-/) |
+2026-10-07 — Completed planning cleanup. Removed previous milestone and quick-task
+artifacts; retained milestone summaries, backlog candidates and unresolved follow-ups.
 
 ## Session Continuity
 
