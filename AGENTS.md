@@ -43,6 +43,10 @@ Check MDK before implementing convergence, recovery, or wire encoding; record de
 
 Branch before committing; never commit on `master`. Use focused conventional commits (`fix:`, `feat:`, `docs:`, `chore:`) after relevant checks pass. PRs should explain behavior, link related issues, and report validation.
 
+For every user-visible library change, add a short customer-facing description under
+`## Unreleased` in `CHANGELOG.md`. Describe the behavior or benefit, and call out
+breaking changes with migration guidance.
+
 Add new docs pages to `.vitepress/config.ts`. Use `.agents/skills/applesauce/` for Nostr work and `.agents/skills/opentui/` for terminal UIs.
 
 Before edits, start `/gsd-quick`, `/gsd-debug`, or `/gsd-execute-phase`, unless explicitly bypassed by the user.

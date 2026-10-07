@@ -82,7 +82,7 @@ fi
 
 # Get the latest changelog entry from CHANGELOG.md
 if [ -f "CHANGELOG.md" ]; then
-  CHANGELOG=$(awk '/^## /{if(++count==2) exit} count==1' CHANGELOG.md | tail -n +2 | sed 's/^$//' | head -c 500)
+  CHANGELOG=$(awk '/^## Unreleased$/{next} /^## /{if(++count==2) exit} count==1' CHANGELOG.md | tail -n +2 | sed 's/^$//' | head -c 500)
 else
   echo -e "${YELLOW}Warning: CHANGELOG.md not found${NC}"
   CHANGELOG="No changelog available"

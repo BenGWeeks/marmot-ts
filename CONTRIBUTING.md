@@ -56,3 +56,26 @@ Thank you for your interest in contributing to marmot-ts! This document provides
    ```bash
    npm run build
    ```
+
+## Changelog
+
+For each user-visible library change, add a short description to `## Unreleased` in
+`CHANGELOG.md`. Describe what library users can do or what now works better. Group
+entries under Added, Changed, Fixed, or Breaking changes as appropriate, and include
+migration guidance for breaking changes. Internal-only maintenance does not need an entry.
+
+## Releases
+
+1. Move the Unreleased entries into a section named for the release version and leave
+   an empty `## Unreleased` section for future changes.
+2. Update the root `package.json` version and run `pnpm install --lockfile-only`.
+3. Run `pnpm build`, `pnpm vitest run`, and `bash scripts/package-smoke/run.sh`.
+4. Commit the release metadata through a PR and merge it into `master`.
+5. Tag the merged commit as `v<version>` (for example, `v0.6.0`) and push the tag.
+   The release workflow verifies the version and changelog, publishes the library to
+   npm with provenance, creates a GitHub release from those notes, and announces it
+   on Nostr.
+
+`pnpm release` publishes the root library package locally; it does not publish
+workspace packages. `pnpm release-next` continues to publish temporary prereleases
+from the tip of `origin/master`.

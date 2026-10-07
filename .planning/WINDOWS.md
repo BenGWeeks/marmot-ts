@@ -1,139 +1,22 @@
 ---
 schema_version: 1
-open_count: 9
+open_count: 0
 waived_count: 0
 fixed_count: 0
-total_count: 9
-last_updated: 2026-09-06T18:11:57.391Z
+total_count: 0
+last_updated: "2026-10-07"
 ---
 
 # Broken Windows Ledger
 
-> Cross-phase defect register. `/gsd-ship` blocks while `open_count > 0`.
-> Waive with `gsd-tools windows waive <id> "<reason>"` (reason required).
-> Mark fixed with `gsd-tools windows fixed <id>`.
+Active ledger for new work. Historical entries are preserved in
+[the previous ledger](archive/pre-v0.6.0/BASE-WINDOWS.md), with their disposition in
+[release follow-ups](archive/pre-v0.6.0/RELEASE-FOLLOWUPS.md). Zero active entries
+does not mean those findings were fixed or release readiness was verified.
 
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
-| 1 | 03.1 | unrun-verify | src/__tests__/exports.test.ts |  | Full suite otherwise passed; pre-existing export snapshot drift remains assigned to plan 03.1-08 | open |  | 2026-09-02T14:52:14.235Z |  |
-| 2 | 03.1 | deviation | .planning/STATE.md |  | Corrected stale 11/11 state position to 12/14 after state.advance-plan misclassified the phase as complete | open |  | 2026-09-02T16:32:47.191Z |  |
-| 3 | 04 | deviation | src/__tests__/conformance/manifest.ts |  | Executable vector path validation distinguishes scenario vectors from inventory-only formal records | open |  | 2026-09-05T15:54:48.522Z |  |
-| 4 | 04.1 | deviation | src/core/group.ts |  | Wired lifecycle defaults into real group creation | open |  | 2026-09-06T16:13:16.265Z |  |
-| 5 | 04.1 | deviation | src/core/__tests__/group.test.ts |  | Updated stale group-construction lifecycle expectation | open |  | 2026-09-06T16:13:16.377Z |  |
-| 6 | 04.1 | deviation | src/client/session/group-session.ts |  | Added read-only hydrated disband request projection required by the public facade | open |  | 2026-09-06T16:32:30.422Z |  |
-| 7 | 04.1 | deviation | src/client/group/__tests__/marmot-group.test.ts |  | Updated stale expected component list after lifecycle-v1 became required | open |  | 2026-09-06T16:32:30.529Z |  |
-| 8 | 05 | deviation | deno.lock |  | Generated Deno lockfile removed after runtime smoke execution | open |  | 2026-09-06T18:11:18.234Z |  |
-| 9 | 05 | deviation | .planning/STATE.md |  | Repaired Phase 5 position after state.advance-plan could not parse the initial Not started state | open |  | 2026-09-06T18:11:57.391Z |  |
 
 ````json
-[
-  {
-    "id": 1,
-    "kind": "unrun-verify",
-    "phase": "03.1",
-    "file": "src/__tests__/exports.test.ts",
-    "line": null,
-    "description": "Full suite otherwise passed; pre-existing export snapshot drift remains assigned to plan 03.1-08",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-02T14:52:14.235Z",
-    "resolved_at": null
-  },
-  {
-    "id": 2,
-    "kind": "deviation",
-    "phase": "03.1",
-    "file": ".planning/STATE.md",
-    "line": null,
-    "description": "Corrected stale 11/11 state position to 12/14 after state.advance-plan misclassified the phase as complete",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-02T16:32:47.191Z",
-    "resolved_at": null
-  },
-  {
-    "id": 3,
-    "kind": "deviation",
-    "phase": "04",
-    "file": "src/__tests__/conformance/manifest.ts",
-    "line": null,
-    "description": "Executable vector path validation distinguishes scenario vectors from inventory-only formal records",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-05T15:54:48.522Z",
-    "resolved_at": null
-  },
-  {
-    "id": 4,
-    "kind": "deviation",
-    "phase": "04.1",
-    "file": "src/core/group.ts",
-    "line": null,
-    "description": "Wired lifecycle defaults into real group creation",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T16:13:16.265Z",
-    "resolved_at": null
-  },
-  {
-    "id": 5,
-    "kind": "deviation",
-    "phase": "04.1",
-    "file": "src/core/__tests__/group.test.ts",
-    "line": null,
-    "description": "Updated stale group-construction lifecycle expectation",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T16:13:16.377Z",
-    "resolved_at": null
-  },
-  {
-    "id": 6,
-    "kind": "deviation",
-    "phase": "04.1",
-    "file": "src/client/session/group-session.ts",
-    "line": null,
-    "description": "Added read-only hydrated disband request projection required by the public facade",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T16:32:30.422Z",
-    "resolved_at": null
-  },
-  {
-    "id": 7,
-    "kind": "deviation",
-    "phase": "04.1",
-    "file": "src/client/group/__tests__/marmot-group.test.ts",
-    "line": null,
-    "description": "Updated stale expected component list after lifecycle-v1 became required",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T16:32:30.529Z",
-    "resolved_at": null
-  },
-  {
-    "id": 8,
-    "kind": "deviation",
-    "phase": "05",
-    "file": "deno.lock",
-    "line": null,
-    "description": "Generated Deno lockfile removed after runtime smoke execution",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T18:11:18.234Z",
-    "resolved_at": null
-  },
-  {
-    "id": 9,
-    "kind": "deviation",
-    "phase": "05",
-    "file": ".planning/STATE.md",
-    "line": null,
-    "description": "Repaired Phase 5 position after state.advance-plan could not parse the initial Not started state",
-    "status": "open",
-    "reason": "",
-    "recorded_at": "2026-09-06T18:11:57.391Z",
-    "resolved_at": null
-  }
-]
+[]
 ````

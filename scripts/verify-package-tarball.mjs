@@ -7,7 +7,7 @@
 //
 // With --check-fork-unpublished it also fails closed unless the fork cannot be published
 // (either it is marked private, or its exact version is already published upstream, which
-// `changeset publish` will then skip).
+// cannot be republished under that version).
 //
 // Used by `pnpm release`, `scripts/release-next.sh`, and `scripts/package-smoke/run.sh`.
 // Uses only Node.js builtins.
@@ -183,7 +183,7 @@ function checkForkUnpublishedGuard() {
     if (output === forkPkg.version) {
       console.log(
         `--check-fork-unpublished: ${forkPkg.name}@${forkPkg.version} already exists upstream; ` +
-          "changeset publish will skip it. Notice: the durable fix is to mark the fork private " +
+          "that version cannot be republished. Notice: the durable fix is to mark the fork private " +
           '(set "private": true in ts-mls/package.json).',
       );
       return;

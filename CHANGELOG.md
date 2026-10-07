@@ -1,5 +1,35 @@
 # @internet-privacy/marmot-ts
 
+## Unreleased
+
+### Added
+
+- Use `MarmotGroupEngine` from the engine entrypoint to manage group state without a Nostr transport, with changes applied after successful publication.
+- Use `GroupSession`, `MarmotGroup.session`, and `MarmotGroup.runtime` for direct control over group send, receive, persistence, and publication. `GroupsManager` adds session and runtime helpers, including Welcome delivery.
+- Encrypt and decrypt group media with `GroupMediaService`, including a cache for decrypted media.
+- Enable optional forensic audit logging to investigate group activity.
+- Check group compatibility through `profileSupport` and identify older KeyPackages through `ListedKeyPackage.nonCurrent`.
+- Receive account identity proof rejection details and group removal or disband notifications during recovery.
+
+### Changed
+
+- Bundle the forked MLS implementation with the library. Import MLS primitives from `@internet-privacy/marmot-ts/mls`; additional cryptographic backends are optional dependencies needed only for their ciphersuites.
+- Sign account identity proofs with the client's own signer using the current `0x8009` member proof format.
+
+### Fixed
+
+- Publish KeyPackage proposal tags that match the advertised proposals, including GREASE values, so MDK accepts them. Reject missing, malformed, or mismatched proposal tags when selecting invite candidates; matching older tags without GREASE remain supported.
+- Validate member identity proofs during sends, ingestion, and fork recovery, preventing invalid membership changes from being accepted.
+- Authorize commits against their parent state, including during fork recovery and when an admin is demoted earlier in an ingestion batch.
+- Keep admin restrictions enforced when optional group metadata is malformed, and reject invalid group component updates before applying them.
+
+### Breaking changes
+
+- Legacy account identity proofs (`0xf2f1`) and their helper exports are removed. New groups require `0x8009`; incompatible groups cannot be joined, and stored incompatible groups refuse traffic. Republish current KeyPackages and explicitly purge obsolete ones. See the [account identity proof migration guide](docs/client/best-practices.md#migrating-to-account-identity-proof-v2-0x8009).
+- Separate proof-signer options are removed. `generateKeyPackage` requires a `signer`, and `makeLeafAppComponentsExtension` requires an encoded current proof.
+- `ForkRecovery.resolveFork` now takes an `adminCallbackFor` function instead of a single `adminCallback`.
+- Ingest results add `unsupported-profile` and `account-identity-proof` reasons. A `rejected` result can now describe a standalone proposal as well as a commit; update exhaustive result handlers accordingly.
+
 ## 0.5.1
 
 ### Patch Changes

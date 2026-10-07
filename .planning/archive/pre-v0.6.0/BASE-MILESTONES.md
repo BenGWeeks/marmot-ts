@@ -13,7 +13,7 @@ so marmot-ts interoperates with MDK's default Current-profile groups.
 **Closeout:** verified_closeout — milestone audit `passed` (re-scored after Phase 8's missing
 VERIFICATION.md was produced at close: 4/4 criteria, GRP-01..04 satisfied); all 6 phases verification
 `passed`; open-artifact audit clear. No `v2.0` git tag (milestone ≠ npm version). Tech debt carried
-forward is listed in `archive/pre-v0.6.0/milestones/v2.0-MILESTONE-AUDIT.md` (notably: Phase 8 WR-01..03 review fixes lack
+forward is listed in `milestones/v2.0-MILESTONE-AUDIT.md` (notably: Phase 8 WR-01..03 review fixes lack
 regression tests; Phase 10 WR-06 foundingAdd TOCTOU; Phase 11 export-surface guard gaps).
 
 **Key accomplishments:**
@@ -25,7 +25,7 @@ regression tests; Phase 10 WR-06 foundingAdd TOCTOU; Phase 11 export-surface gua
 - **Founding creation via Welcome** — `foundingAdd` merges epoch 0→1 locally with no kind-445 publish, `Stable` immediately, per-invitee retryable Welcomes via `deliverMany()`; relay-less invitees fail closed; unacked Welcomes stay retryable (FOUND-01..05)
 - **Exports & QA gate** — per-subpath export snapshots with a legacy-export guard, MIP-NN citations rewritten to topic spec paths, package smoke fixed; all nine CI jobs green (QA-04, QA-05)
 
-**Archives:** `archive/pre-v0.6.0/milestones/v2.0-ROADMAP.md`, `archive/pre-v0.6.0/milestones/v2.0-REQUIREMENTS.md`, `archive/pre-v0.6.0/milestones/v2.0-MILESTONE-AUDIT.md`, `archive/pre-v0.6.0/milestones/v2.0-phases/`, `archive/pre-v0.6.0/milestones/v2.0-research/`
+**Archives:** `milestones/v2.0-ROADMAP.md`, `milestones/v2.0-REQUIREMENTS.md`, `milestones/v2.0-MILESTONE-AUDIT.md`, `milestones/v2.0-phases/`, `milestones/v2.0-research/`
 
 ---
 
@@ -52,6 +52,6 @@ fixed in code and moved to `todos/done/`.
 - **Terminal group disbanding** — `marmot.group.lifecycle.v1` codec and an absorbing, durable, canonically-selected `disbanded` state (LIFE-01, LIFE-02, CONV-05)
 - **Conformance & quality gate** — MDK scenario vectors as an automated parity harness, six-runtime CI matrix, four byte-exact Rust/TS parity dossiers bound to one tested source SHA (CONF-01, QA-01, QA-02)
 
-**Archives:** `archive/pre-v0.6.0/milestones/v1.0-ROADMAP.md`, `archive/pre-v0.6.0/milestones/v1.0-REQUIREMENTS.md`, `archive/pre-v0.6.0/milestones/v1.0-phases/`
+**Archives:** `milestones/v1.0-ROADMAP.md`, `milestones/v1.0-REQUIREMENTS.md`, `milestones/v1.0-phases/`
 
 ---

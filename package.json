@@ -12,7 +12,7 @@
     "compile": "tsc -b tsconfig.build.json",
     "vendor": "node scripts/vendor-ts-mls.mjs",
     "prepublishOnly": "pnpm run build",
-    "release": "pnpm build && node scripts/verify-package-tarball.mjs --check-fork-unpublished && changeset publish --provenance",
+    "release": "pnpm build && node scripts/verify-package-tarball.mjs --check-fork-unpublished && pnpm publish --access public --provenance --no-git-checks",
     "release-next": "./scripts/release-next.sh",
     "lint": "prettier --check .",
     "format": "prettier --write .",
@@ -145,7 +145,6 @@
     }
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.0",
     "@types/debug": "^4.1.13",
     "@types/node": "^24.13.2",
     "applesauce-accounts": "^6.2.0",
