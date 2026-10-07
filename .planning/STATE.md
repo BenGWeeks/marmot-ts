@@ -4,10 +4,10 @@ milestone: v2.0
 current_phase_name: between milestones
 status: Awaiting next milestone
 stopped_at: Planning cleanup complete
-last_updated: "2026-10-07T21:06:15.173Z"
+last_updated: "2026-10-07T21:27:04.097Z"
 last_activity: 2026-10-07
 last_activity_desc: Removed completed planning history; retained backlog and follow-ups
-state_head: bc32282
+state_head: 4400c4c68da7bd6ceb17883886abf415b7340bfe
 milestone_name: Account identity proof v2
 progress:
   total_phases: 6
@@ -29,7 +29,7 @@ The npm release being prepared is v0.6.0; no next milestone is active.
 Phase: None — between milestones
 Plan: None
 Status: Awaiting next milestone
-Last activity: 2026-10-07 — Compressed completed planning history
+Last activity: 2026-10-07 — Completed quick task 261007-ml6: Fix next-tag package release script
 
 ## Accumulated Context
 
@@ -52,6 +52,10 @@ Historical workflow artifacts have been removed; unresolved findings remain abov
 
 2026-10-07 — Completed planning cleanup. Removed previous milestone and quick-task
 artifacts; retained milestone summaries, backlog candidates and unresolved follow-ups.
+
+| # | Description | Date | Commit | Directory |
+| --- | --- | --- | --- | --- |
+| 261007-ml6 | Fix next-tag package release script | 2026-10-07 | 4400c4c | [261007-ml6-fix-next-tag-package-release-script](./quick/261007-ml6-fix-next-tag-package-release-script/) |
 
 ## Session Continuity
 
