@@ -78,4 +78,9 @@ migration guidance for breaking changes. Internal-only maintenance does not need
 
 `pnpm release` publishes the root library package locally; it does not publish
 workspace packages. `pnpm release-next` continues to publish temporary prereleases
-from the tip of `origin/master`.
+from the tip of `origin/master`. Log in with `npm login` first. The script builds
+and verifies the root package tarball, then publishes that exact tarball under
+`next` (for example, `0.6.1-next.20261007211500`), leaving `latest` unchanged.
+The original package manifest and lockfile are restored on success or failure.
+Run `node --test scripts/__tests__/release-next.test.mjs` to check the release
+flow without publishing.

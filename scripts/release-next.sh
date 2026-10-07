@@ -9,10 +9,12 @@ if ! command -v pnpm >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v git >/dev/null 2>&1; then
-  echo "Error: git is required but was not found" >&2
-  exit 1
-fi
+for tool in git node npm; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Error: $tool is required but was not found" >&2
+    exit 1
+  fi
+done
 
 if [ ! -f package.json ]; then
   echo "Error: package.json not found. Run this script from the repository root." >&2
@@ -36,9 +38,9 @@ if [ "$local_head" != "$remote_head" ]; then
   exit 1
 fi
 
-if ! pnpm npm whoami >/dev/null 2>&1; then
+if ! npm whoami >/dev/null 2>&1; then
   echo "Error: not logged in to the npm registry used by pnpm." >&2
-  echo "Run 'pnpm npm login' before publishing a next release." >&2
+  echo "Run 'npm login' before publishing a next release." >&2
   exit 1
 fi
 
@@ -62,12 +64,14 @@ restore_package_files() {
   rm -rf "$backup_dir"
 }
 trap restore_package_files EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 package_name=$(node -p "require('./package.json').name")
 current_version=$(node -p "require('./package.json').version")
 base_version=$(node -e '
 const version = process.argv[1];
-const match = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+const match = /^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(version);
 if (!match) throw new Error(`Unsupported package version: ${version}`);
 const [, major, minor, patch] = match;
 process.stdout.write(`${major}.${minor}.${Number(patch) + 1}`);
@@ -82,9 +86,20 @@ if pnpm view "${package_name}@${next_version}" version >/dev/null 2>&1; then
   exit 1
 fi
 
-pnpm version "$next_version" --no-git-tag-version
+node --input-type=module - "$next_version" <<'NODE'
+import fs from 'node:fs';
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+pkg.version = process.argv[2];
+fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+NODE
 pnpm build
-node scripts/verify-package-tarball.mjs --check-fork-unpublished
-pnpm publish --tag next --access public --no-git-checks
+pnpm pack --pack-destination "$backup_dir"
+tarballs=("$backup_dir"/*.tgz)
+if [ "${#tarballs[@]}" -ne 1 ] || [ ! -f "${tarballs[0]}" ]; then
+  echo "Error: expected exactly one packed tarball." >&2
+  exit 1
+fi
+node scripts/verify-package-tarball.mjs --tarball "${tarballs[0]}" --check-fork-unpublished
+pnpm publish "${tarballs[0]}" --tag next --access public --no-git-checks
 
 echo "Published ${package_name}@${next_version} with dist-tag next."
