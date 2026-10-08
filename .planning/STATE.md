@@ -5,8 +5,8 @@ current_phase_name: between milestones
 status: Awaiting next milestone
 stopped_at: Planning cleanup complete
 last_updated: "2026-10-07T21:27:04.097Z"
-last_activity: 2026-10-07
-last_activity_desc: Removed completed planning history; retained backlog and follow-ups
+last_activity: 2026-10-08
+last_activity_desc: Docs hero images removed; docs reviewed against code/spec/MDK
 state_head: 4400c4c68da7bd6ceb17883886abf415b7340bfe
 milestone_name: Account identity proof v2
 progress:
@@ -29,7 +29,7 @@ The npm release being prepared is v0.6.0; no next milestone is active.
 Phase: None — between milestones
 Plan: None
 Status: Awaiting next milestone
-Last activity: 2026-10-07 — Completed quick task 261007-ml6: Fix next-tag package release script
+Last activity: 2026-10-08 — Completed quick task 261008-ecl: Docs hero image removal and protocol accuracy review
 
 ## Accumulated Context
 
@@ -56,6 +56,7 @@ artifacts; retained milestone summaries, backlog candidates and unresolved follo
 | # | Description | Date | Commit | Directory |
 | --- | --- | --- | --- | --- |
 | 261007-ml6 | Fix next-tag package release script | 2026-10-07 | 4400c4c | [261007-ml6-fix-next-tag-package-release-script](./quick/261007-ml6-fix-next-tag-package-release-script/) |
+| 261008-ecl | Remove docs hero images; review docs vs code/spec/MDK | 2026-10-08 | fb0008b | [261008-ecl-docs-hero-image-removal-and-protocol-acc](./quick/261008-ecl-docs-hero-image-removal-and-protocol-acc/) |
 
 ## Session Continuity
 
