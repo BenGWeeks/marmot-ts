@@ -1,23 +1,25 @@
 # Members
 
-Query and manage group membership, including multi-device support.
+Query group membership and the leaves (devices) each account has in a group.
 
 ## Querying Members
 
 ### Get All Members
 
 ```typescript
-import { getGroupMembers } from "@internet-privacy/marmot-ts";
+import { getGroupMemberPubkeys } from "@internet-privacy/marmot-ts";
 
-const members = getGroupMembers(clientState);
-// Returns array of Nostr pubkeys (hex strings)
+const members = getGroupMemberPubkeys(clientState);
+// Unique Nostr pubkeys (hex); leaves with invalid identities are skipped
 
 console.log(`Group has ${members.length} members`);
 ```
 
-## Multi-Device Support
+`getGroupMembers` is a deprecated alias of `getGroupMemberPubkeys`. Don't confuse it with ts-mls's own `getGroupMembers` on the `/mls` entrypoint, which returns `LeafNode`s.
 
-Users can have multiple devices (leaf nodes) in the same group with the same Nostr pubkey.
+## Multiple Leaves per Account
+
+An account MAY have several leaves (one per device) in the same group, all with the same Nostr pubkey ([`foundation/identity.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/identity.md)). These helpers enumerate them; device linking and roster management (multi-device) are not yet specified by Marmot.
 
 ### Get Leaf Nodes for a Pubkey
 
@@ -49,36 +51,50 @@ const indexes = getCredentialLeafNodeIndexes(clientState, credential);
 
 ## Removing Members
 
-To remove a member, you need their leaf node indexes:
+Removing another member requires an active admin ([`app-components/admin-policy-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/admin-policy-v1.md)). Use the client helper, which removes every leaf for the pubkey:
+
+```typescript
+import { Proposals } from "@internet-privacy/marmot-ts";
+
+// proposeRemoveUser returns one Remove per leaf; resolve it against the
+// group's current state, then commit the resulting proposals
+const removals = await Proposals.proposeRemoveUser(targetPubkey)(
+  group.session.proposalContext(),
+);
+await client.groups.commit(group.id, { extraProposals: removals });
+```
+
+At the core/MLS level, the equivalent proposals are:
 
 ```typescript
 import { getPubkeyLeafNodeIndexes } from "@internet-privacy/marmot-ts";
-import { createRemove } from "@internet-privacy/marmot-ts/mls";
+import {
+  defaultProposalTypes,
+  type ProposalRemove,
+} from "@internet-privacy/marmot-ts/mls";
 
-// Get all leaf nodes for the user
-const indexes = getPubkeyLeafNodeIndexes(clientState, targetPubkey);
-
-// Create remove proposals for each leaf node
-const removeProposals = indexes.map((index) =>
-  createRemove(index, ciphersuiteImpl),
-);
-
-// Include in a commit to finalize removal
+const removeProposals: ProposalRemove[] = getPubkeyLeafNodeIndexes(
+  clientState,
+  targetPubkey,
+).map((removed) => ({
+  proposalType: defaultProposalTypes.remove,
+  remove: { removed },
+}));
 ```
 
-This removes all devices for a user from the group.
+If the target is a listed admin and the commit removes their last leaf, the same commit MUST also remove them from the admin policy. When you commit through `client.groups.commit`, the engine splices that admin-policy update in automatically, and refuses a commit that would leave no admin. Members leave voluntarily with `self_remove` (`client.groups.leave`), not a Remove proposal ([`protocol-core/member-departure.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/member-departure.md)).
 
 ## Example: Multi-Device User
 
 ```typescript
 import {
-  getGroupMembers,
+  getGroupMemberPubkeys,
   getPubkeyLeafNodes,
   getPubkeyLeafNodeIndexes,
 } from "@internet-privacy/marmot-ts";
 
 // Get all unique members
-const members = getGroupMembers(clientState);
+const members = getGroupMemberPubkeys(clientState);
 
 // Check each member's devices
 for (const pubkey of members) {

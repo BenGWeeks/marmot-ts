@@ -19,13 +19,15 @@ Nostr Event (kind 445)
 
 ### Key Derivation
 
-```typescript
-// Derives encryption key from current MLS epoch
-key = MLS_Exporter(exporter_secret, "marmot", "group-event", 32);
-
-// Uses the derived key as a ChaCha20-Poly1305 key
-encrypted = ChaCha20Poly1305_Encrypt(key, mlsMessage);
+```text
+group_event_key = MLS-Exporter("marmot", "group-event", 32)   // per epoch
+nonce           = random(12)                                  // CSPRNG, fresh per event
+aad             = ""                                          // empty
+ciphertext      = ChaCha20-Poly1305.encrypt(group_event_key, nonce, mls_message_bytes, aad)
+event.content   = base64(nonce || ciphertext)                 // standard base64, padded
 ```
+
+A kind 445 event carries exactly one `h` tag (the lowercase-hex `nostr_group_id`). Receivers reject content that is not valid base64 or decodes to fewer than 28 bytes (12-byte nonce plus 16-byte tag). See [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md).
 
 This approach:
 
@@ -38,7 +40,7 @@ This approach:
 
 - **Ephemeral Signing:** Group events signed with ephemeral keys (not user's identity key)
 - **Unlinkability:** Events cannot be tied to specific users by observers
-- **Rumor-Based:** Application messages are unsigned events (can't be republished if leaked)
+- **Rumor-Based:** Application messages are unsigned inner events; MLS authenticates the sender
 
 ## Creating Group Events
 
@@ -56,13 +58,13 @@ const event = await createGroupEvent({
 // event is a fully formed Nostr event (including signature)
 ```
 
+::: warning Spec deviation
+When a group's `message-retention.v1` component enables a retention duration, senders SHOULD attach a NIP-40 `expiration` tag to application-message kind 445 events ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md), "Message expiration"). `createGroupEvent` never adds this tag. Commits and proposals must never carry one.
+:::
+
 ### Ephemeral Signer
 
-The ephemeral signer should generate a new keypair for each event:
-
-```typescript
-The Marmot implementation handles per-event ephemeral signing internally.
-```
+`createGroupEvent` signs each kind 445 event with a fresh random key generated for that event. The key is never reused and is never the sender's account key ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md), "Group message delivery").
 
 ## Decrypting Group Events
 
@@ -100,30 +102,39 @@ const { read, unreadable } = await decryptGroupMessages(
 // `unreadable` contains events that could not be decrypted in the current epoch.
 ```
 
+::: warning
+These helpers only decrypt. They do not verify the outer event. Before decrypting, verify the NIP-01 id and signature and check that the event has exactly one `h` tag matching the group. Events in `unreadable` are not terminal: retry them after the epoch (or the set of retained candidate epochs) changes instead of discarding them. `MarmotGroup.ingest()` and `client.groups.connect()` handle all of this for you.
+:::
+
 ## Commit Ordering
 
-When multiple admins send commits for the same epoch, Marmot uses deterministic convergence to prevent conflicts ([MIP-03](https://github.com/marmot-protocol/mips/blob/main/mips/mip-03.md)).
+When members race commits for the same epoch, Marmot deterministically selects one canonical branch (spec: [`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md)). Any member can race this way, for example with a self-update or self-remove commit; it is not limited to admins.
 
-### Sorting Commits
+### Ordering Rules
+
+Convergence is decided from authenticated MLS bytes only. Relay `created_at`, Nostr event ids and arrival order MUST NOT choose group state. When two commits race for the same epoch, the canonical branch is the one with:
+
+1. Higher effective commit depth
+2. Witness quorum (beats no quorum)
+3. Higher app-witness score
+4. A privileged tip (beats an ordinary one)
+5. Lower committer account pubkey
+6. Lower `commit_digest` (SHA-256 of the commit's MLSMessage bytes)
+
+`MarmotGroup.ingest()` / `MarmotGroupEngine` implement convergence, rollback and retained-history handling. Use them rather than ordering commits yourself.
+
+### `sortGroupCommits`
 
 ```typescript
 import { sortGroupCommits } from "@internet-privacy/marmot-ts";
 
-// Sort commits by: timestamp → event ID
+// Deterministic pre-order: MLS source epoch, then commit_digest
 const sortedPairs = sortGroupCommits(messagePairs);
-
-// Process commits in deterministic order
-for (const { event, message } of sortedPairs) {
-  // Process commit
-}
 ```
 
-### Ordering Rules
-
-1. **Timestamp (`created_at`):** Earlier timestamp wins
-2. **Event ID:** Lexicographically smallest as tiebreaker
-
-This ensures all group members converge to the same state regardless of message arrival order.
+::: warning
+`sortGroupCommits` is a simplified (source epoch, `commit_digest`) pre-order. It does not implement full branch selection. Like `isCommitMessage`, `isProposalMessage` and `isApplicationMessage`, it only understands MLS `PrivateMessage` handshakes. Marmot sends commits and proposals as `PublicMessage`, so these helpers don't classify them (`sortGroupCommits` gives them source epoch 0).
+:::
 
 ## Application Messages
 
@@ -147,27 +158,29 @@ interface Rumor {
 
 **Why unsigned?**
 
-- Cannot be republished if leaked (no signature to verify)
-- Only valid within encrypted MLS context
-- Protects against leak exploitation
+- MLS already authenticates the sender as a group member
+- The payload is not a valid standalone Nostr event, so it can't be published to relays
+- Clients MUST NOT add a Nostr signature ([`foundation/application-messages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/application-messages.md))
 
 ### Serializing Rumors
 
 ```typescript
-import { serializeApplicationRumor } from "@internet-privacy/marmot-ts";
+import {
+  createChatRumor,
+  serializeApplicationRumor,
+} from "@internet-privacy/marmot-ts";
 
-const rumor = {
-  kind: 1,
-  content: "Hello, group!",
-  tags: [],
-  created_at: Math.floor(Date.now() / 1000),
+// kind 9 chat rumor, id = canonical NIP-01 hash
+const rumor = createChatRumor({
   pubkey: senderPubkey,
-  id: rumorId,
-};
+  content: "Hello, group!",
+});
 
 const serialized = serializeApplicationRumor(rumor);
 // Use this as MLS application data
 ```
+
+For custom kinds, build the rumor yourself and set `id: getEventHash(rumor)` (from `applesauce-core/helpers/event`). Decoders reject a rumor whose `id` is not the canonical NIP-01 hash.
 
 ### Deserializing Rumors
 
@@ -181,111 +194,47 @@ console.log(rumor.content); // "Hello, group!"
 console.log(rumor.pubkey); // Sender's pubkey
 ```
 
+`deserializeApplicationData` checks the structure (the exact six members, no `sig`) and the `id`. It does **not** check who sent the message. If you process MLS messages yourself, use `verifyApplicationRumorAuthorship(applicationData, senderAccountPubkeyHex)` instead. It also checks that the inner `pubkey` equals the MLS-authenticated sender's account identity, so a member can't impersonate another member. `MarmotGroup` runs this check before emitting `applicationMessage`.
+
 ## Complete Message Flow
+
+The recommended path is the client: [`MarmotGroup`](/client/marmot-group) handles MLS encryption, the group event envelope, convergence-gated sending, and inbound validation (admin policy, identity proofs, commit legality, convergence).
+
+::: tip Why not raw `processMessage`?
+`createApplicationMessage` / `processMessage` from `@internet-privacy/marmot-ts/mls` apply MLS rules only. They skip Marmot's admin-policy, identity-proof, commit-legality, authorship and convergence checks. The Marmot credential policy (the `authService` they need) is not part of the public API either. Use the client or engine path below.
+:::
 
 ### Sending a Message
 
 ```typescript
 import {
-  serializeApplicationRumor,
-  createGroupEvent,
+  createApplicationMessageIntent,
+  createChatRumor,
 } from "@internet-privacy/marmot-ts";
-import { createApplicationMessage } from "@internet-privacy/marmot-ts/mls";
 
-// 1. Create rumor
-const rumor = {
-  kind: 1,
-  content: "Hello!",
-  tags: [],
-  created_at: Math.floor(Date.now() / 1000),
-  pubkey: myPubkey,
-  id: rumorId,
-};
-
-// 2. Serialize rumor
-const appData = serializeApplicationRumor(rumor);
-
-// 3. Encrypt with MLS
-const { newState, message } = await createApplicationMessage({
-  context: {
-    cipherSuite: ciphersuiteImpl,
-    authService,
-    externalPsks: {},
-  },
-  state: clientState,
-  message: appData,
-});
-
-// 4. Create group event
-const event = await createGroupEvent({
-  message,
-  state: clientState,
-  ciphersuite: ciphersuiteImpl,
-});
-
-// 5. Publish to relays
-await network.publish(relays, event);
-clientState = newState;
+const rumor = createChatRumor({ pubkey: myPubkey, content: "Hello!" });
+await client.groups.send(group.id, createApplicationMessageIntent(rumor));
+// or: await group.submitIntent(createApplicationMessageIntent(rumor));
 ```
 
 ### Receiving Messages
 
 ```typescript
-import {
-  decryptGroupMessages,
-  sortGroupCommits,
-  deserializeApplicationData,
-  isApplicationMessage,
-  isCommitMessage,
-} from "@internet-privacy/marmot-ts";
-import { processMessage } from "@internet-privacy/marmot-ts/mls";
+import { deserializeApplicationData } from "@internet-privacy/marmot-ts";
 
-// 1. Fetch events from relays
-const events = await fetchGroupEvents(relays, groupId);
+// Subscribes to the group's relays, verifies each kind 445 event
+// (signature + `h` tag), and drains it through group.ingest()
+const sub = await client.groups.connect(group.id);
 
-// 2. Decrypt all events
-const { read: pairs, unreadable } = await decryptGroupMessages(
-  events,
-  clientState,
-  ciphersuiteImpl,
-);
+group.on("applicationMessage", (data) => {
+  const rumor = deserializeApplicationData(data);
+  console.log(`${rumor.pubkey}: ${rumor.content}`);
+});
 
-// 3. Separate commits from application messages
-const commits = pairs.filter(isCommitMessage);
-const appMessages = pairs.filter(isApplicationMessage);
-
-// 4. Sort and process commits first
-const sortedCommits = sortGroupCommits(commits);
-for (const { message } of sortedCommits) {
-  const result = await processMessage({
-    context: {
-      cipherSuite: ciphersuiteImpl,
-      authService,
-      externalPsks: {},
-    },
-    state: clientState,
-    message,
-  });
-  if (result.kind === "newState") clientState = result.newState;
-}
-
-// 5. Process application messages
-for (const { message } of appMessages) {
-  const result = await processMessage({
-    context: {
-      cipherSuite: ciphersuiteImpl,
-      authService,
-      externalPsks: {},
-    },
-    state: clientState,
-    message,
-  });
-  if (result.kind === "applicationMessage") {
-    clientState = result.newState;
-    displayMessage(deserializeApplicationData(result.message));
-  }
-}
+// later: sub.unsubscribe();
 ```
+
+To feed events manually, verify each event first, then pass a batch to `group.ingest(events)` and fully drain that generator before starting another one. See [MarmotGroup](/client/marmot-group#receiving-messages).
 
 ## Privacy Properties
 
@@ -307,7 +256,6 @@ Group events are signed with ephemeral keys:
 ### Unlinkability
 
 - Events cannot be tied to specific users
-- Timing analysis is harder (many users, ephemeral keys)
 - Content completely opaque to non-members
 
 ## Related

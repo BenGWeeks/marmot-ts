@@ -19,13 +19,23 @@ Setting up a client requires providing the infrastructure adapters:
 
 ```typescript
 import { MarmotClient } from "@internet-privacy/marmot-ts";
+import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
+
+// KeyPackage slot id: 32 random bytes as lowercase hex, generated once per
+// install, persisted, and reused on every start. `loadSetting`/`saveSetting`
+// stand in for your app's own settings storage.
+let clientId = await loadSetting("keyPackageSlot");
+if (!clientId) {
+  clientId = bytesToHex(randomBytes(32));
+  await saveSetting("keyPackageSlot", clientId);
+}
 
 const client = new MarmotClient({
   signer: yourNostrSigner,
   network: yourNostrNetworkInterface,
   groupStateStore: yourGroupStateStore,
   keyPackageStore: yourKeyPackageStore,
-  clientId: "my-app-desktop",
+  clientId,
 });
 ```
 
@@ -39,10 +49,15 @@ const client = new MarmotClient({
 **Optional dependencies:**
 
 - **`inviteStore`** - `GenericKeyValueStore<StoredInviteEntry>` backing `client.invites`; defaults to an in-memory store.
+- **`ingestStateStore`**, **`rewindStore`**, **`removedMarkerStore`**, **`lifecycleStore`** - durable backends for ingest replay evidence, the fork-history tree, removal markers, and disband/lifecycle records. Most are in-memory when omitted; see [Storage](/client/storage#all-stores) for what each one holds and why production clients should provide them.
 - **`historyFactory`** - Per-group message history backend factory (see [History](/client/history)).
 - **`capabilities`** - MLS `Capabilities` advertised on key packages; defaults to `defaultCapabilities()`.
 - **`cryptoProvider`** - Override the MLS crypto provider.
-- **`clientId`** - Default `d`-tag slot for published kind 30443 key packages.
+- **`clientId`** - Default `d`-tag slot for published kind 30443 key packages. `create()` throws `MissingSlotIdentifierError` if neither `clientId` nor an explicit `identifier` is set.
+
+::: warning Spec deviation
+The spec requires the KeyPackage `d` slot to be 32 random bytes encoded as lowercase hex, generated once and persisted, and never derived from a device label or identity material ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)). marmot-ts accepts any string and publishes it unchanged, so generate the value as shown above. Do not use a device name.
+:::
 
 ::: tip Complete Setup Guide
 For a complete walkthrough of setting up storage and network interfaces, see the [Getting Started](/getting-started) guide.
@@ -96,7 +111,27 @@ const { group } = await client.joinGroupFromWelcome({
 });
 ```
 
-The client handles deserializing the Welcome, initializing your MLS state, and persisting it to storage.
+The client handles deserializing the Welcome, initializing your MLS state, and persisting it to storage. Before accepting, show the user who sent the invite (the Welcome rumor's `pubkey`) and, if useful, the group details from `client.previewWelcome(invite)`.
+
+After joining, the library leaves two follow-ups to you:
+
+```typescript
+// 1. Catch up on the group's outstanding commits, then rotate your leaf key.
+await client.groups.connect(group.id);
+await group.selfUpdate();
+
+// 2. Rotate the KeyPackage the Welcome consumed (same `d` slot; the old private
+//    material is removed).
+for (const pkg of await client.keyPackages.list()) {
+  if (pkg.used) await client.keyPackages.rotate(pkg.keyPackageRef);
+}
+```
+
+The spec says a new member SHOULD self-update promptly after joining, before sending application messages when feasible, with a recommended window of 24 hours ([`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)). marmot-ts does not do this automatically.
+
+::: warning Spec deviation
+[`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md) requires deleting consumed KeyPackage private material. `joinGroupFromWelcome` only marks the KeyPackage `used`. Call `client.keyPackages.rotate(ref)` or `client.keyPackages.remove(ref)` to delete it.
+:::
 
 ### Loading Groups
 
@@ -110,7 +145,7 @@ const group = await client.groups.get(groupId);
 const allGroups = await client.groups.loadAll();
 ```
 
-Once loaded, the `MarmotGroup` instance remains in the client's cache until explicitly unloaded or the client is destroyed.
+Once loaded, the `MarmotGroup` instance remains in the client's cache until it is unloaded (`client.groups.unload`) or destroyed (`client.groups.destroy`).
 
 ### Unloading and Cleanup
 
@@ -120,13 +155,47 @@ To free up memory when a group is no longer actively used:
 await client.groups.unload(groupId);
 ```
 
-This removes the group from the in-memory cache but preserves all data in storage.
+This removes the group from the in-memory cache, disposes its timers and queued outbound work, and preserves all data in storage.
 
 To permanently delete a group and all its history:
 
 ```typescript
 await client.groups.destroy(groupId);
 ```
+
+## Receiving group traffic
+
+The client does not subscribe to relays until you ask it to. `client.groups.connect()` and `client.groups.connectAll()` run the receive loop for you. They fetch a group's kind 445 backlog from its relays, open a live subscription, and pass every event through `group.ingest()`. Before ingesting, they check each event's signature and its `h` routing tag, drop duplicates by event id, and drain each batch fully.
+
+```typescript
+// Keep every loaded, created, joined, or imported group connected.
+// Groups that are unloaded, destroyed, left, removed, or disbanded are
+// disconnected automatically.
+const connection = client.groups.connectAll();
+
+// Or connect a single group. `fallbackRelays` is used only when the group
+// has no relays of its own.
+const single = await client.groups.connect(groupId, {
+  fallbackRelays: ["wss://relay.example.com"],
+});
+
+// Later: disconnect
+connection.unsubscribe();
+single.unsubscribe();
+```
+
+Decrypted messages then arrive through the group's [`applicationMessage` event](/client/marmot-group#receiving-messages) and its [history](/client/history). Events that fail the signature or `h`-tag check are reported through the `rejected` event, and events that cannot be read through `unreadable`:
+
+```typescript
+client.groups.on("rejected", (groupId, event, reason) => {
+  console.warn("rejected kind 445", event.id, reason);
+});
+client.groups.on("unreadable", (groupId, event) => {
+  console.warn("unreadable kind 445", event.id);
+});
+```
+
+`connect()` skips a group that has no relays and no `fallbackRelays`, a group without Nostr routing, and a group that is removed or disbanded.
 
 ## Reactive State
 
@@ -146,15 +215,13 @@ for await (const groups of client.groups.watch()) {
 
 - The loop continuously yields the current group list
 - Emits whenever groups are created, joined, loaded, or destroyed
-- Runs until explicitly canceled or the client is destroyed
+- Runs until you exit the loop
 
 **Key package monitoring:**
 
 ```typescript
 for await (const packages of client.keyPackages.watchKeyPackages()) {
-  if (packages.length < 5) {
-    await generateMoreKeyPackages();
-  }
+  updateKeyPackageUI(packages); // includes used and non-current entries
 }
 ```
 
@@ -180,6 +247,8 @@ const abortController = new AbortController();
 abortController.abort();
 ```
 
+The loop only checks the signal when the next value arrives, so the generator and its listener stay alive until the next `updated` event. For UI integrations, see [UI Framework Integration](/client/ui-frameworks).
+
 ### Events for Lifecycle Hooks
 
 For more granular control, listen to specific lifecycle events on `client.groups`:
@@ -198,7 +267,7 @@ client.groups.on("destroyed", (groupId) => {
 });
 ```
 
-**Available group events:** `updated`, `loaded`, `created`, `imported`, `joined`, `unloaded`, `destroyed`, `left`
+**Available group events:** `updated`, `loaded`, `created`, `imported`, `joined`, `unloaded`, `destroyed`, `left`, `removed` (an inbound commit removed you; the local state is kept as a tombstone), `disbanded` (a terminal disband was recorded), and, from `connect()` / `connectAll()` subscriptions, `unreadable` (an event could not be read) and `rejected` (a kind 445 event failed signature or `h`-tag validation).
 
 ## Working with Groups
 
@@ -213,19 +282,23 @@ See the [`MarmotGroup` documentation](/client/marmot-group) for details on:
 
 ## Key Package Management
 
-Before others can invite you to groups, you need to publish [key packages](/core/key-packages) to Nostr relays. The client helps manage these:
+Before others can invite you to groups, you need to publish [key packages](/core/key-packages) to Nostr relays. Publish them to the write relays in your kind 10002 NIP-65 relay list (`r` tags marked `write` or unmarked); inviters fetch them from there.
 
 ```typescript
-// Watch your key package inventory
-for await (const packages of client.keyPackages.watchKeyPackages()) {
-  if (packages.length === 0) {
-    // Generate and publish more key packages
-  }
-}
+import { getNip65Relays } from "@internet-privacy/marmot-ts";
+
+// On startup: make sure one current, unused KeyPackage is published in this
+// device's `clientId` slot. A no-op if one already exists.
+const myNip65WriteRelays = getNip65Relays(myRelayListEvent, "write");
+await client.keyPackages.ensurePublished({ relays: myNip65WriteRelays });
 ```
 
 ::: tip Key Package Lifecycle
-Key packages are one-time-use cryptographic material (unless marked as "last resort"). Monitor your key package store and replenish them periodically so others can always add you to groups.
+KeyPackages are created as last-resort by default, so the single package in your device's slot can accept several invites. Kind 30443 is addressable, so repeated `create()` calls in the same `d` slot replace each other on relays and only one stays discoverable. Rotate the package after it has been used (see [Joining an Existing Group](#joining-an-existing-group)). To publish more than one KeyPackage at a time, create extra slots with distinct random `identifier` values.
+:::
+
+::: warning Spec deviation
+marmot-ts marks last-resort KeyPackages with the legacy MLS extension `0x000a` (and advertises it in capabilities). The spec uses app_data_dictionary component `0x0004` instead ([`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md), [`foundation/registries.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/registries.md)).
 :::
 
 ## Multi-Account Support
@@ -235,6 +308,8 @@ If your application supports multiple user accounts, each account **must have co
 ### Per-Account Storage Pattern
 
 Create separate storage instances namespaced by the user's public key:
+
+`createAppKeyValueStore` below stands in for your app's own store factory (for example `localforage.createInstance`); it is not a library export.
 
 ```typescript
 function getStorageForAccount(pubkey: string) {
@@ -252,6 +327,8 @@ function getKeyPackageStoreForAccount(pubkey: string) {
 }
 ```
 
+Apply the same per-account namespacing to every other store you pass: `inviteStore`, `ingestStateStore`, `rewindStore`, `removedMarkerStore`, and `lifecycleStore`.
+
 ### Account Switching
 
 When a user switches accounts, create a new client instance with the new account's storage:
@@ -263,6 +340,8 @@ async function switchToAccount(newAccount: Account) {
     network: sharedNetworkInterface, // Can be reused across accounts
     groupStateStore: getStorageForAccount(newAccount.pubkey),
     keyPackageStore: getKeyPackageStoreForAccount(newAccount.pubkey),
+    // App helper: per-account version of the persisted random-hex slot shown in Initialization
+    clientId: await getKeyPackageSlotForAccount(newAccount.pubkey),
   });
 
   return newClient;

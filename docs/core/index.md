@@ -1,14 +1,14 @@
 # Core Module
 
-The Core module (`marmot-ts/core`) implements the Marmot v2 protocol layer, providing the fundamental building blocks for privacy-preserving group messaging. It bridges MLS (Message Layer Security) cryptographic operations with Nostr's decentralized event distribution, and is wire-compatible with the [darkmatter](https://github.com/parres-hq/darkmatter) reference implementation.
+The Core module (`@internet-privacy/marmot-ts/core`) implements the Marmot v2 protocol layer, providing the fundamental building blocks for privacy-preserving group messaging. It bridges MLS (Message Layer Security) cryptographic operations with Nostr's decentralized event distribution, and is wire-compatible with the [darkmatter](https://github.com/parres-hq/darkmatter) reference implementation.
 
 ## What's in the Core Module
 
 The Core module is responsible for:
 
-- **Protocol Implementation:** MLS group operations following the Marmot v2 specifications (MIP-00 through MIP-03)
+- **Protocol Implementation:** MLS group operations following the [Marmot spec](https://github.com/marmot-protocol/marmot) (`foundation/`, `protocol-core/`, `app-components/`, `transports/nostr.md`)
 - **Identity Bridging:** Converting Nostr public keys to MLS credentials, including the account identity proof app component (`0x8009`, `marmot.member.account-identity-proof.v2`)
-- **Message Encryption:** Group events (kind 445) encrypted with a per-epoch MIP-03 key; Welcome messages gift-wrapped via NIP-59
+- **Message Encryption:** Group events (kind 445) carry MLS messages under an outer ChaCha20-Poly1305 layer keyed by a per-epoch MLS exporter secret ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)); Welcome messages are gift-wrapped via NIP-59
 - **Key Package Management:** Creating and handling cryptographic material for member addition
 - **State Serialization:** Encoding/decoding group state for persistence
 
@@ -21,13 +21,17 @@ The Core module is responsible for:
 
 ## Installation
 
+```bash
+pnpm add @internet-privacy/marmot-ts
+```
+
 ```typescript
 import {
   createCredential,
   generateKeyPackage,
   createGroup,
   // ... other exports
-} from "@internet-privacy/marmot-ts";
+} from "@internet-privacy/marmot-ts/core"; // also re-exported from the package root
 ```
 
 ## Topics
@@ -54,7 +58,7 @@ Handle message encryption, decryption, commit ordering, and application messages
 
 ### [Members](./members)
 
-Query and manage group membership, including multi-device support.
+Query group membership and the leaves (devices) each account has in a group.
 
 ### [Welcome Messages](./welcome)
 
@@ -68,6 +72,8 @@ Publish and discover key packages using Nostr events.
 
 Manage and serialize MLS group state for persistence.
 
+### [API Reference](pathname:///reference/index.html)
+
 Complete API documentation for all Core module functions.
 
 ## When to Use Core
@@ -76,7 +82,7 @@ Use the Core module when you need:
 
 - **Fine-grained control** over MLS operations
 - **Custom client implementations** with specific requirements
-- **Protocol extensions** or implementing new MIPs
+- **Protocol extensions** or implementing new app components / spec features
 - **Research and experimentation** with the protocol
 - **Understanding** of the underlying protocol layer
 
@@ -84,10 +90,11 @@ For most applications, use the [Client module](/client/) instead, which provides
 
 ## Protocol Compliance
 
-The Core module implements the following Marmot Improvement Proposals:
+The Core module implements the topic-based Marmot spec (the old MIP numbering is deprecated; see [`mip-coverage.md`](https://github.com/marmot-protocol/marmot/blob/master/mip-coverage.md) for the mapping):
 
-- **[MIP-00](https://github.com/marmot-protocol/mips/blob/main/mips/mip-00.md):** Introduction and Basic Operations
-- **[MIP-01](https://github.com/marmot-protocol/mips/blob/main/mips/mip-01.md):** Network Transport & Relay Communication
-- **[MIP-02](https://github.com/marmot-protocol/mips/blob/main/mips/mip-02.md):** Identities and Keys
-- **[MIP-03](https://github.com/marmot-protocol/mips/blob/main/mips/mip-03.md):** Group State & Memberships
-- **[MIP-04](https://github.com/marmot-protocol/mips/blob/main/mips/mip-04.md):** Encrypted Media _(in progress)_
+- **Identity & KeyPackages:** [`foundation/identity.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/identity.md), [`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md), [`app-components/account-identity-proof-v2.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/account-identity-proof-v2.md)
+- **Group setup & state:** [`protocol-core/group-setup.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-setup.md), [`protocol-core/group-state.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-state.md), [`app-components/`](https://github.com/marmot-protocol/marmot/blob/master/app-components)
+- **Joining (Welcomes):** [`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)
+- **Group messaging & departure:** [`protocol-core/group-messaging.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-messaging.md), [`protocol-core/member-departure.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/member-departure.md), [`foundation/application-messages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/application-messages.md)
+- **Nostr transport:** [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)
+- **Encrypted media:** [`features/encrypted-media-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/features/encrypted-media-v1.md) / [`app-components/group-encrypted-media-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/group-encrypted-media-v1.md) _(v1 component `0x8008` only, in progress; the newer `group-encrypted-media-v2.md` component is not implemented)_

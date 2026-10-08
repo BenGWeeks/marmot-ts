@@ -1,6 +1,6 @@
 # Network interface
 
-Marmot does not connect to relays itself. You pass a `NostrNetworkInterface` into `MarmotClient`; that same object is used by `KeyPackageManager`, `GroupsManager`, and each `MarmotGroup`. Event and filter types are the usual nostr shapes (e.g. nostr-tools’ `Event` and `Filter`).
+Marmot does not connect to relays itself. You pass a `NostrNetworkInterface` into `MarmotClient`; that same object is used by `KeyPackageManager`, `GroupsManager`, and each `MarmotGroup`. Event and filter types are applesauce's `NostrEvent` and `Filter`; nostr-tools' `Event` and `Filter` are structurally compatible.
 
 ## Contract
 
@@ -24,13 +24,13 @@ interface NostrNetworkInterface {
 
 `Subscribable` is `{ subscribe(observer) → { unsubscribe() } }`; RxJS observables fit if they expose that shape.
 
-- **`publish`** — Publish signed events to the listed relays. Return per-relay `ok` / `message` so failures surface after commits and welcomes. Used by `KeyPackageManager` (key packages, deletes) and `MarmotGroup` (MLS traffic, app messages, welcome gift wraps).
+- **`publish`** — Publish signed events to the listed relays. Return per-relay `ok` / `message` so failures surface after commits and welcomes. Used by `KeyPackageManager` (key packages, deletes), each group's `GroupRuntime` (MLS traffic, app messages), and Welcome delivery (gift wraps).
 
-- **`request`** — One-shot REQ/EOSE-style fetch; dedupe by `id` if you merge multiple filters. Not called inside Marmot’s core MLS paths; useful on the same object for app-level discovery.
+- **`request`** — One-shot REQ until EOSE; dedupe by `id` if you merge multiple filters. Used by `client.groups.connect()` / `connectAll()` to backfill a group's kind 445 history.
 
-- **`subscription`** — Live updates; emit one event per `next`. Not required for core MLS flows inside the library; handy for background sync next to the client.
+- **`subscription`** — Live updates; emit one event per `next`. Used by `client.groups.connect()` / `connectAll()` for live kind 445 traffic and by `client.invites.listen()`.
 
-- **`getUserInboxRelays`** — Where `pubkey` receives wrapped welcomes (`kind` 1059). `MarmotGroup` uses this when adding members; on failure or empty list it falls back to group relays. Typical input: the recipient's inbox relay list (`kind` 10050).
+- **`getUserInboxRelays`** — Where `pubkey` receives gift-wrapped Welcomes (kind 1059), read from their kind 10050 `relay` tags. Welcome delivery calls it for each invitee. If it **throws**, delivery falls back to the group's relays. If it returns an **empty list**, delivery for that invitee fails and is reported as a failed Welcome outcome. Return `[]` only when the user really has no inbox list.
 
 ## Wiring `nostr-tools`
 
@@ -45,6 +45,7 @@ import type {
   Subscribable,
   Unsubscribable,
 } from "@internet-privacy/marmot-ts/client";
+import { getInboxRelays } from "@internet-privacy/marmot-ts";
 import { SimplePool } from "nostr-tools/pool";
 
 const pool = new SimplePool();
@@ -112,15 +113,15 @@ export function nostrToolsNetwork(): NostrNetworkInterface {
 
     async getUserInboxRelays(pubkey) {
       const ev = await pool.get(METADATA_RELAYS, {
-        kinds: [10002],
+        kinds: [10050],
         authors: [pubkey],
         limit: 1,
       });
       if (!ev) return [];
-      return ev.tags.filter((t) => t[0] === "r" && t[1]).map((t) => t[1]!);
+      return getInboxRelays(ev);
     },
   };
 }
 ```
 
-Tune relay lists and `getUserInboxRelays` to match how you resolve NIP-65 vs key-package relay lists in production.
+KeyPackage discovery uses the account's kind 10002 NIP-65 write relays (`getNip65Relays(event, "write")`); Welcome delivery uses kind 10050 inbox relays (`getInboxRelays(event)`). See [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md).

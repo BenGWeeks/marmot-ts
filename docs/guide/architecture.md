@@ -41,16 +41,16 @@ the engine's outbound effects to relays).
 
 The [Core module](/core/) implements the Marmot v2 protocol layer and provides fundamental building blocks:
 
-- **Protocol Implementation:** MLS group operations following the Marmot v2 specifications (MIP-00 through MIP-03)
+- **Protocol Implementation:** MLS group operations following the Marmot v2 spec (`foundation/`, `protocol-core/`)
 - **Identity Bridging:** Converting Nostr public keys to MLS credentials (incl. the account identity proof app component, `0x8009`)
-- **Message Encryption:** Per-epoch MIP-03 encryption for group events; NIP-59 gift wraps for Welcomes
+- **Message Encryption:** kind 445 outer ChaCha20-Poly1305 layer keyed from the MLS exporter (`transports/nostr.md`); NIP-59 gift wraps for Welcomes
 - **Key Package Management:** Creating and handling cryptographic material for member addition
 - **State Serialization:** Encoding/decoding group state for persistence
 
 **When to use Core directly:**
 
 - Building custom clients with specific requirements
-- Implementing protocol extensions or MIPs
+- Implementing protocol extensions or app components
 - Research and experimentation
 - Fine-grained control over MLS operations
 
@@ -74,15 +74,15 @@ The [Client module](/client/) provides a high-level, production-ready implementa
 
 ### Engine Module
 
-The [Engine module](https://github.com/marmot-protocol/marmot-ts/tree/master/src/engine) (`marmot-ts/engine`) is the protocol state machine that sits between the client and core layers. It is transport-agnostic — it knows nothing about Nostr — and is responsible for:
+The [Engine module](https://github.com/marmot-protocol/marmot-ts/tree/master/src/engine) (`@internet-privacy/marmot-ts/engine`) is the protocol state machine that sits between the client and core layers. It is transport-agnostic (generic over an envelope type via an injected `GroupPeeler`; only audit metadata assumes Nostr-shaped envelopes) and is responsible for:
 
 - **`MarmotGroupEngine`:** owns the MLS `ClientState` and drives inbound/outbound processing
 - **Convergence:** deterministic resolution of concurrent commits (`convergenceStatus`: `Syncing` → `Resolving` → `Settled`/`Blocked`)
-- **Lifecycle:** the publish-before-apply commit lifecycle (`Stable`, `PendingPublish`, `Merging`)
-- **Ingest dispositions:** classifying every inbound envelope (`processed`, `deferred`, `unreadable`, `autoCommit`, `removed`, …)
+- **Lifecycle:** the publish-before-apply commit lifecycle (`Stable` → `PendingPublish` → `Merging` → `Stable`, plus `Recovering`, `Disbanded`, `Unrecoverable`)
+- **Ingest classification:** every inbound envelope yields a result (`processed`, `deferred`, `unreadable`, `autoCommit`, `removed`, …) tagged with a `Disposition` (`accepted`, `stale`, `deferred`, `invalidated`)
 - **Retained history & fork recovery:** bounded rewind so late or reordered events can still be processed
 
-Outbound sends are **convergence-gated**: a `SendIntent` submitted while the group is not `Settled` is queued until convergence resolves. The client layer adds the Nostr transport (`GroupRuntime`) and persistence (`GroupSession`) around this engine.
+Outbound sends are **convergence-gated**, but the engine itself holds no outbound queue: it reports convergence status and arms a settle-window callback. `MarmotGroup.submitIntent()` (and `client.groups.send()`) queue intents while the group is not `Settled` and release them when convergence settles; `leave()` and the self_remove auto-commit bypass the gate. The client layer adds the Nostr transport (`GroupRuntime`) and persistence (`GroupSession`) around this engine.
 
 **When to use Engine:**
 
@@ -140,21 +140,22 @@ Your chat UI, commands, and business logic.
 ### Creating a Group
 
 ```
-1. generateKeyPackage() → CompleteKeyPackage
-2. createGroup() → ClientState with the app-component dictionary
-3. createGroupEvent() → Encrypted kind 445 event
-4. Publish to Nostr relays
+1. generateKeyPackage() → creator's CompleteKeyPackage (with 0x8009 identity proof)
+2. createSimpleGroup() → ClientState with profile, admin-policy and nostr-routing components
+3. Persist state locally — nothing is published for a solo create
+4. (Founding create with invitees) merge one Add commit to epoch 1 locally,
+   then gift-wrap Welcomes; no kind 445 is published
 ```
 
 ### Adding Members
 
 ```
-1. Fetch recipient's key package (kind 30443 from relays)
+1. Fetch recipient's key package (kind 30443 from their kind 10002 write relays)
 2. MLS add proposal + commit → Welcome + MLSMessage
-3. createWelcomeRumor() → kind 444 rumor
-4. createGiftWrap() → kind 1059 encrypted gift wrap
-5. createGroupEvent() → kind 445 commit event
-6. Publish both events to relays
+3. createGroupEvent() → kind 445 commit event (MLS PublicMessage, ephemeral signer)
+4. Publish the commit and wait for relay acks
+5. Only after the commit is acked: createWelcomeRumor() → kind 444 rumor
+6. createGiftWrap() → kind 1059, published to the invitee's kind 10050 inbox relays
 ```
 
 ### Sending Messages
@@ -170,10 +171,11 @@ Your chat UI, commands, and business logic.
 ### Receiving Messages
 
 ```
-1. Fetch kind 445 events from relays
+1. client.groups.connect()/connectAll() fetches + subscribes to kind 445 events
+   and verifies each event's signature and `h` tag
 2. group.ingest(events) → engine peels each into an MLSMessage
 3. Engine processes commits/proposals → updates ClientState (convergence-aware)
-4. Each envelope yields a disposition (processed, deferred, unreadable, …)
+4. Each envelope yields a result (processed, deferred, unreadable, …) carrying a disposition (accepted, stale, deferred, invalidated)
 5. Decrypted application messages emit the `applicationMessage` event
 6. deserializeApplicationData() → rumor → display in UI
 ```
@@ -204,7 +206,6 @@ Your chat UI, commands, and business logic.
 
 - Strong TypeScript typing throughout
 - Generic types for flexibility (history, storage)
-- Branded types for domain concepts
 - Exhaustive pattern matching
 
 ### Extensibility
@@ -231,13 +232,14 @@ Your chat UI, commands, and business logic.
 
 ## Protocol Compliance
 
-Marmot-TS implements **Marmot v2** and is wire-compatible with the [darkmatter](https://github.com/parres-hq/darkmatter) reference implementation:
+Marmot-TS implements the **Marmot v2** specification ([marmot-protocol/marmot](https://github.com/marmot-protocol/marmot)) and is wire-compatible with the [darkmatter](https://github.com/parres-hq/darkmatter) reference implementation:
 
-- **[MIP-00](https://github.com/marmot-protocol/mips/blob/main/mips/mip-00.md):** Introduction and Basic Operations
-- **[MIP-01](https://github.com/marmot-protocol/mips/blob/main/mips/mip-01.md):** Network Transport & Relay Communication
-- **[MIP-02](https://github.com/marmot-protocol/mips/blob/main/mips/mip-02.md):** Identities and Keys
-- **[MIP-03](https://github.com/marmot-protocol/mips/blob/main/mips/mip-03.md):** Group State & Memberships
-- **[MIP-04](https://github.com/marmot-protocol/mips/blob/main/mips/mip-04.md):** Encrypted Media _(in progress)_
+- **Identity & key packages:** [`foundation/identity.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/identity.md), [`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md), [`app-components/account-identity-proof-v2.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/account-identity-proof-v2.md)
+- **Group setup & app components:** [`protocol-core/group-setup.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-setup.md), [`app-components/`](https://github.com/marmot-protocol/marmot/tree/master/app-components)
+- **Joining (Welcomes):** [`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)
+- **Group messaging, convergence & departure:** [`protocol-core/group-messaging.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-messaging.md), [`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md), [`protocol-core/member-departure.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/member-departure.md)
+- **Nostr transport binding:** [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)
+- **Encrypted media:** [`features/encrypted-media-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/features/encrypted-media-v1.md) (v1 only; [`app-components/group-encrypted-media-v2.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/group-encrypted-media-v2.md) is not yet implemented)
 
 ## Security Properties
 
@@ -253,7 +255,7 @@ Marmot-TS implements **Marmot v2** and is wire-compatible with the [darkmatter](
 - **Ephemeral Signing:** Group events signed with ephemeral keys, not user identity keys
 - **Unlinkability:** Events cannot be linked to specific users by observers
 - **Gift-Wrapped Welcome:** Welcome messages wrapped in NIP-59 gift wraps for privacy
-- **Admin Policy:** Only designated admins can send commits (configurable)
+- **Admin Policy:** group-changing commits (add/remove/metadata) require an admin listed in `marmot.group.admin-policy.v1`; any member may commit its own self-update or a self_remove departure
 - **Deterministic Ordering:** Commit conflicts resolved deterministically
 
 ### Nostr Properties

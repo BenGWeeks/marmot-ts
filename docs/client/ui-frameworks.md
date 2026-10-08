@@ -1,9 +1,5 @@
 # UI Frameworks
 
-:::info
-This page needs to be rewritten and cleaned up
-:::
-
 `MarmotClient` exposes reactive APIs through manager **async generators** (`client.groups.watch()` and `client.keyPackages.watchKeyPackages()`) that emit updates whenever state changes. To integrate with UI frameworks, you'll need to convert these async generators into your framework's native reactivity system.
 
 This guide shows how to consume these async iterators in different frameworks and patterns for managing the client instance lifecycle.
@@ -72,15 +68,14 @@ await iterator.return?.();
 
 ### Custom Hook Pattern
 
-React components re-render frequently, so you need to ensure the async generator is created **once** and persists across renders:
+Create a **fresh generator on every effect run** and close it in the cleanup. React 18 StrictMode runs effects twice in development, and a closed generator can't be iterated again, so don't cache the generator in a `useRef`:
 
 ```typescript
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import type { MarmotClient, MarmotGroup } from "@internet-privacy/marmot-ts";
 
 function useWatchGroups(client: MarmotClient | null) {
   const [groups, setGroups] = useState<MarmotGroup[]>([]);
-  const genRef = useRef<AsyncGenerator<MarmotGroup[]> | null>(null);
 
   useEffect(() => {
     if (!client) {
@@ -88,24 +83,19 @@ function useWatchGroups(client: MarmotClient | null) {
       return;
     }
 
-    // Create generator only once
-    if (!genRef.current) {
-      genRef.current = client.groups.watch();
-    }
-
+    const gen = client.groups.watch(); // fresh generator per effect run
     let cancelled = false;
-    const gen = genRef.current;
 
     (async () => {
-      for await (const groups of gen) {
+      for await (const value of gen) {
         if (cancelled) break;
-        setGroups(groups);
+        setGroups(value);
       }
     })();
 
     return () => {
       cancelled = true;
-      gen.return?.(); // Properly close the generator
+      void gen.return(undefined); // finishes once the pending update resolves
     };
   }, [client]);
 
@@ -119,7 +109,7 @@ function GroupList({ client }) {
   return (
     <ul>
       {groups.map(group => (
-        <li key={group.idStr}>{group.groupData.name}</li>
+        <li key={group.idStr}>{group.groupData?.name ?? "(disbanded)"}</li>
       ))}
     </ul>
   );
@@ -128,17 +118,43 @@ function GroupList({ client }) {
 
 **Key points:**
 
-- `useRef` stores the generator so it survives re-renders
-- `gen.return()` properly closes the generator on cleanup to prevent memory leaks
-- `cancelled` flag prevents state updates after unmount
-- Empty dependency array on the inner effect (if you extract it) ensures the loop starts once
+- A new generator per effect run survives StrictMode double-mounts and `client` changes
+- The `cancelled` flag prevents state updates after unmount
+- `gen.return()` doesn't finish right away. While the generator is waiting for the next change, the return is queued, and its listener is removed only when the next `updated` event fires.
+
+**Immediate teardown with events:** if you need the listener removed as soon as the component unmounts, use the manager's events directly:
+
+```typescript
+function useGroups(client: MarmotClient | null) {
+  const [groups, setGroups] = useState<MarmotGroup[]>([]);
+
+  useEffect(() => {
+    if (!client) {
+      setGroups([]);
+      return;
+    }
+    let cancelled = false;
+    client.groups.loadAll().then((initial) => {
+      if (!cancelled) setGroups(initial);
+    });
+    client.groups.on("updated", setGroups);
+    return () => {
+      cancelled = true;
+      client.groups.off("updated", setGroups);
+    };
+  }, [client]);
+
+  return groups;
+}
+```
 
 **Reusable for key packages:**
 
 ```typescript
+import type { ListedKeyPackage } from "@internet-privacy/marmot-ts";
+
 function useWatchKeyPackages(client: MarmotClient | null) {
-  const [packages, setPackages] = useState([]);
-  const genRef = useRef(null);
+  const [packages, setPackages] = useState<ListedKeyPackage[]>([]);
 
   useEffect(() => {
     if (!client) {
@@ -146,12 +162,8 @@ function useWatchKeyPackages(client: MarmotClient | null) {
       return;
     }
 
-    if (!genRef.current) {
-      genRef.current = client.keyPackages.watchKeyPackages();
-    }
-
+    const gen = client.keyPackages.watchKeyPackages();
     let cancelled = false;
-    const gen = genRef.current;
 
     (async () => {
       for await (const pkgs of gen) {
@@ -162,7 +174,7 @@ function useWatchKeyPackages(client: MarmotClient | null) {
 
     return () => {
       cancelled = true;
-      gen.return?.();
+      void gen.return(undefined);
     };
   }, [client]);
 
@@ -210,14 +222,14 @@ export function useWatchGroups(client) {
 <script>
   import { useWatchGroups } from "./useWatchGroups.svelte.js";
 
-  export let client;
+  let { client } = $props();
 
   const stream = useWatchGroups(client);
 </script>
 
 <ul>
   {#each stream.value as group}
-    <li>{group.groupData.name}</li>
+    <li>{group.groupData?.name ?? "(disbanded)"}</li>
   {/each}
 </ul>
 ```
@@ -262,7 +274,7 @@ function GroupList(props) {
 
   return (
     <ul>
-      <For each={groups()}>{(group) => <li>{group.groupData.name}</li>}</For>
+      <For each={groups()}>{(group) => <li>{group.groupData?.name ?? "(disbanded)"}</li>}</For>
     </ul>
   );
 }
@@ -271,7 +283,7 @@ function GroupList(props) {
 **Why SolidJS is ideal:**
 
 - Component body runs **once**, no re-render issues
-- No need for `useRef` or memoization tricks
+- No effect re-runs or memoization tricks
 - Natural fit for async generator pattern
 
 ## Vue 3 Integration
@@ -315,7 +327,7 @@ const groups = useWatchGroups(props.client);
 <template>
   <ul>
     <li v-for="group in groups" :key="group.idStr">
-      {{ group.groupData.name }}
+      {{ group.groupData?.name ?? "(disbanded)" }}
     </li>
   </ul>
 </template>
@@ -340,7 +352,7 @@ let cancelled = false;
 
     groups.forEach((group) => {
       const li = document.createElement("li");
-      li.textContent = group.groupData.name;
+      li.textContent = group.groupData?.name ?? "(disbanded)";
       container.appendChild(li);
     });
   }
@@ -363,7 +375,7 @@ client.groups.on("updated", (groups) => {
 });
 
 client.groups.on("created", (group) => {
-  showNotification(`New group: ${group.groupData.name}`);
+  showNotification(`New group: ${group.groupData?.name ?? "(unnamed)"}`);
 });
 ```
 
@@ -371,7 +383,7 @@ client.groups.on("created", (group) => {
 
 | Framework    | Setup Complexity | Generator Stability | Cleanup                            |
 | ------------ | ---------------- | ------------------- | ---------------------------------- |
-| **React**    | Medium           | Needs `useRef`      | `gen.return()` in cleanup          |
+| **React**    | Medium           | New one per effect  | `gen.return()` in cleanup          |
 | **Svelte 5** | Low              | Natural (runs once) | `gen.return()` in `$effect` return |
 | **SolidJS**  | Low              | Natural (runs once) | `gen.return()` in `onCleanup`      |
 | **Vue 3**    | Low              | Natural (runs once) | `gen.return()` in `onUnmounted`    |
@@ -389,25 +401,24 @@ client.groups.on("created", (group) => {
 
 ### Per-Account Storage Isolation
 
-**Critical:** Each user account must have isolated storage to prevent key material from mixing:
+**Critical:** each user account must have its own isolated storage so key material never mixes. Isolate **every** store the client uses, not only the group and key package stores:
 
 ```typescript
-function getStorageForAccount(pubkey: string) {
-  // IndexedDB
-  return new IndexedDBStateStore(`marmot-${pubkey}`);
+import localforage from "localforage"; // any GenericKeyValueStore works
 
-  // Or LocalForage
-  return localforage.createInstance({
-    name: `marmot-${pubkey}`,
-    storeName: "groups",
-  });
-}
+function storesForAccount(pubkey: string) {
+  // LocalForage instances satisfy GenericKeyValueStore (see Storage)
+  const store = (storeName: string) =>
+    localforage.createInstance({ name: `marmot-${pubkey}`, storeName });
 
-function getKeyPackageStoreForAccount(pubkey: string) {
-  return createAppKeyValueStore({
-    name: `marmot-${pubkey}`,
-    storeName: "keyPackages",
-  });
+  return {
+    groupStateStore: store("groups"),
+    keyPackageStore: store("keyPackages"),
+    inviteStore: store("invites"),
+    ingestStateStore: store("ingest"),
+    rewindStore: store("rewind"),
+    removedMarkerStore: store("removed"),
+  };
 }
 ```
 
@@ -417,24 +428,36 @@ function getKeyPackageStoreForAccount(pubkey: string) {
 - Mixing storage would leak keys between accounts
 - Security requires complete isolation per account
 
+See [Storage](/client/storage) for the store contract and other backends.
+
 ### Account Switching Pattern
 
-When a user switches accounts, destroy the old client and create a new one:
+When a user switches accounts, tear down the old client's relay subscriptions and groups first. Otherwise they keep ingesting into the old account's stores. Then create a new client:
 
 ```typescript
+import type { Unsubscribable } from "@internet-privacy/marmot-ts/client";
+
 let currentClient: MarmotClient | null = null;
+let groupSync: Unsubscribable | undefined;
+let inviteSync: Unsubscribable | undefined;
 
 async function switchToAccount(account: Account) {
-  // Clean up old client (optional, but good practice)
+  // Stop the old account's relay subscriptions and release its groups
+  groupSync?.unsubscribe();
+  inviteSync?.unsubscribe();
+  for (const group of currentClient?.groups.loaded ?? []) group.dispose();
   currentClient = null;
 
   // Create new client with account-specific storage
   currentClient = new MarmotClient({
-    signer: account.signer,
-    network: sharedNetworkInterface, // Can be shared
-    groupStateStore: getStorageForAccount(account.pubkey),
-    keyPackageStore: getKeyPackageStoreForAccount(account.pubkey),
+    signer: account.signer, // must support nip44
+    network: sharedNetworkInterface, // can be shared
+    clientId: account.keyPackageSlotId, // persisted random 32-byte hex, per account
+    ...storesForAccount(account.pubkey),
   });
+
+  groupSync = currentClient.groups.connectAll();
+  inviteSync = await currentClient.invites.listen(account.inboxRelays);
 
   return currentClient;
 }
@@ -449,16 +472,15 @@ async function switchToAccount(account: Account) {
 ## Background Synchronization
 
 ::: warning
-`MarmotClient` does **not** automatically keep groups synchronized with relays. Your application needs to:
+`MarmotClient` doesn't open relay subscriptions by itself. Start them once at app startup, not once per page:
 
-1. Subscribe to group events from relays (kind 445)
-2. Call `group.ingest(events)` to process new commits and messages
-3. Maintain these subscriptions even when the UI is on different pages
+- `const groupSync = client.groups.connectAll()` fetches past kind 445 events and processes new ones for every loaded group. It verifies signatures and `h` tags, and it also connects groups that are created or joined later.
+- `const inviteSync = await client.invites.listen(inboxRelays)` receives gift-wrapped Welcomes on your kind 10050 inbox relays.
 
-Without background synchronization, groups will drift out of sync and fail to decrypt new messages.
+Call `.unsubscribe()` on both when the account signs out. Without them, groups fall out of sync and fail to decrypt new messages.
 :::
 
-See the [`MarmotGroup` documentation](/client/marmot-group#processing-events) for details on ingesting events.
+See the [`MarmotGroup` documentation](/client/marmot-group) for details on receiving messages.
 
 ## Next Steps
 

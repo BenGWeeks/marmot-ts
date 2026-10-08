@@ -87,28 +87,11 @@ console.log(defaultMarmotClientConfig);
 
 ## State Updates
 
-ClientState is immutable - operations return a new state:
+ClientState is immutable. Operations return a new state and leave the old one unchanged. Applications don't normally advance ClientState by hand: [`MarmotGroup`](/client/marmot-group) feeds kind 445 events through `group.ingest()`, which validates them and updates `group.state` for you.
 
-```typescript
-import { processMessage } from "@internet-privacy/marmot-ts/mls";
-
-// Process a message (commit, proposal)
-const result = await processMessage({
-  context: {
-    cipherSuite: ciphersuiteImpl,
-    authService,
-    externalPsks: {},
-  },
-  state: clientState,
-  message: mlsMessage,
-});
-
-if (result.kind === "newState") {
-  clientState = result.newState;
-}
-
-// Old state is unchanged; use result.newState going forward when returned.
-```
+::: warning Low-level only
+`processMessage` from `@internet-privacy/marmot-ts/mls` applies MLS rules but none of Marmot's admin-policy, identity-proof, commit-legality or convergence checks. The Marmot credential policy it needs as `authService` is not part of the public API either. Applications should feed events to `MarmotGroup.ingest()` (see [MarmotGroup](/client/marmot-group)) or use `MarmotGroupEngine` from `@internet-privacy/marmot-ts/engine`.
+:::
 
 ## Epoch Advancement
 
@@ -117,24 +100,17 @@ The epoch advances with each commit:
 ```typescript
 import { getEpoch } from "@internet-privacy/marmot-ts";
 
-console.log("Before commit:", getEpoch(clientState)); // 5
+console.log("Before commit:", getEpoch(group.state)); // 5
 
-// Process commit
-const result = await processMessage({
-  context: {
-    cipherSuite: ciphersuiteImpl,
-    authService,
-    externalPsks: {},
-  },
-  state: clientState,
-  message: commit,
-});
-if (result.kind === "newState") clientState = result.newState;
+// Ingest a batch containing a commit; fully drain the generator
+for await (const result of group.ingest(events)) {
+  // result.kind: "processed" | "deferred" | "unreadable" | "rejected" | ...
+}
 
-console.log("After commit:", getEpoch(clientState)); // 6
+console.log("After commit:", getEpoch(group.state)); // 6
 ```
 
-Each epoch has unique encryption keys. Messages from epoch N can only be decrypted by members in epoch N.
+Each epoch has its own keys (the MLS secrets and the kind 445 group-event key). A client can decrypt epoch N messages only while it holds epoch N state. Recent prior epochs are retained for late messages (see ts-mls `keyRetentionConfig` and [retained history](/client/fork-history)).
 
 ## Storage Considerations
 
@@ -146,9 +122,7 @@ Each epoch has unique encryption keys. Messages from epoch N can only be decrypt
 
 ### Size
 
-- Grows with group history and member count
-- Binary format is compact (~few KB for typical groups)
-- Consider periodic re-initialization for very large groups
+- Size scales with member count (ratchet tree) plus a bounded window of retained prior-epoch receiver keys
 
 ### Backup
 
@@ -161,6 +135,7 @@ Each epoch has unique encryption keys. Messages from epoch N can only be decrypt
 ```typescript
 import {
   createSimpleGroup,
+  getGroupIdHex,
   serializeClientState,
   deserializeClientState,
   getMarmotGroupView,
@@ -175,12 +150,13 @@ const { clientState } = await createSimpleGroup(
 );
 
 // 2. Serialize and store
+const groupId = getGroupIdHex(clientState);
 const serialized = serializeClientState(clientState);
 await storage.save(groupId, serialized);
 
 // 3. Later: load from storage
 const loaded = await storage.load(groupId);
-let restoredState = deserializeClientState(loaded);
+const restoredState = deserializeClientState(loaded);
 
 // 4. Use the restored state
 const view = getMarmotGroupView(restoredState);

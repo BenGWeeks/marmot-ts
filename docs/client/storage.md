@@ -1,6 +1,6 @@
 # Storage
 
-Marmot persists three kinds of data through pluggable key/value stores: serialized MLS **group state**, local **key package** material, and received **invites**. All of them share one interface, so any backend that matches its shape works — in-memory for tests, IndexedDB or LocalForage in the browser, the filesystem or SQLite on the server.
+Marmot persists its data through pluggable key/value stores: serialized MLS **group state**, local **key package** material, received **invites**, and the durable records behind ingest replay protection, fork recovery, removal, and disband. All of them share one interface, so any backend that matches its shape works — in-memory for tests, IndexedDB or LocalForage in the browser, the filesystem or SQLite on the server.
 
 ## The `GenericKeyValueStore` interface
 
@@ -20,15 +20,19 @@ The interface is exported from both the root and the `./utils` subpath:
 import type { GenericKeyValueStore } from "@internet-privacy/marmot-ts";
 ```
 
-## The three stores
+## All stores
 
-| Constructor option | Value type                                    | Holds                                            |
-| ------------------ | --------------------------------------------- | ------------------------------------------------ |
-| `groupStateStore`  | `GenericKeyValueStore<SerializedClientState>` | Serialized MLS group state (one entry per group) |
-| `keyPackageStore`  | `GenericKeyValueStore<StoredKeyPackage>`      | Local key package public + private material      |
-| `inviteStore`      | `GenericKeyValueStore<StoredInviteEntry>`     | Received gift wraps and decrypted Welcome rumors |
+| Constructor option   | Value type                                    | Holds                                                                                                   | If omitted                                                            |
+| -------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `groupStateStore`    | `GenericKeyValueStore<SerializedClientState>` | Serialized MLS group state (one entry per group)                                                        | Required                                                              |
+| `keyPackageStore`    | `GenericKeyValueStore<StoredKeyPackage>`      | Local key package public + private material and publish tracking                                        | Required                                                              |
+| `inviteStore`        | `GenericKeyValueStore<StoredInviteEntry>`     | Received gift wraps and decrypted Welcome rumors                                                        | In-memory                                                             |
+| `ingestStateStore`   | `GenericKeyValueStore<Uint8Array>`            | Terminal-wrapper and convergence-effect evidence (replay suppression, acknowledged state invalidations) | In-memory; `client.ingestPersistence` reports `{ kind: "ephemeral" }` |
+| `rewindStore`        | `GenericKeyValueStore<Uint8Array>`            | The per-group [fork-history tree](/client/fork-history) used for fork recovery                          | In-memory; rebuilt from the current tip after a restart               |
+| `removedMarkerStore` | `GenericKeyValueStore<boolean>`               | Marker that a removal from a group was already realized, so `removed` fires once across restarts        | In-memory                                                             |
+| `lifecycleStore`     | `GenericKeyValueStore<Uint8Array>`            | Disband and lifecycle intent and terminal records                                                       | Stored in `groupStateStore` under scoped keys                         |
 
-`groupStateStore` and `keyPackageStore` are required; `inviteStore` is optional and defaults to an in-memory store.
+The spec requires replay evidence, fork-recovery state, and terminal records to survive a restart ([`protocol-core/durability.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/durability.md)). For production, back `ingestStateStore`, `rewindStore`, and `removedMarkerStore` with the same durable (ideally encrypted) storage as `groupStateStore`, and check `client.ingestPersistence.kind === "durable"` at startup.
 
 - **`SerializedClientState`** is a `Uint8Array` — the encoded MLS client state.
 - **`StoredKeyPackage`** carries a key package's public package plus its private key material and publish tracking. Treat it as **secret**.
@@ -44,9 +48,15 @@ For tests and short-lived processes, the `./extra` subpath ships an in-memory im
 ```typescript
 import { InMemoryKeyValueStore } from "@internet-privacy/marmot-ts/extra";
 
-const groupStateStore = new InMemoryKeyValueStore();
-const keyPackageStore = new InMemoryKeyValueStore();
-const inviteStore = new InMemoryKeyValueStore();
+import type { SerializedClientState } from "@internet-privacy/marmot-ts";
+import type {
+  StoredInviteEntry,
+  StoredKeyPackage,
+} from "@internet-privacy/marmot-ts/client";
+
+const groupStateStore = new InMemoryKeyValueStore<SerializedClientState>();
+const keyPackageStore = new InMemoryKeyValueStore<StoredKeyPackage>();
+const inviteStore = new InMemoryKeyValueStore<StoredInviteEntry>();
 ```
 
 ## LocalForage (browser)
@@ -62,12 +72,15 @@ const keyPackageStore = localforage.createInstance({ name: "marmot-keys" });
 
 ## Custom backend
 
-Any object with the five methods works. A minimal filesystem-backed adapter:
+Any object with the five methods works. A minimal adapter over a load/persist pair (for example a file):
 
 ```typescript
 import type { GenericKeyValueStore } from "@internet-privacy/marmot-ts";
 
-function fileStore<T>(load, persist): GenericKeyValueStore<T> {
+function fileStore<T>(
+  load: () => Promise<Record<string, T>>,
+  persist: (all: Record<string, T>) => Promise<void>,
+): GenericKeyValueStore<T> {
   return {
     async getItem(key) {
       return (await load())[key] ?? null;
@@ -93,9 +106,11 @@ function fileStore<T>(load, persist): GenericKeyValueStore<T> {
 }
 ```
 
+Stored values include `Uint8Array`s (`SerializedClientState`, `StoredKeyPackage`, and the `Uint8Array` stores above). Use a binary-safe encoding such as structured clone, CBOR, or base64 per field. Plain `JSON.stringify` silently corrupts them.
+
 ## Per-account isolation
 
-Each user account **must** use completely isolated stores — mixing key package material between accounts would leak private keys. Namespace your stores by the account's public key:
+Each user account **must** use completely isolated stores (all of the stores above) — mixing key package material between accounts would leak private keys. Namespace your stores by the account's public key:
 
 ```typescript
 const store = localforage.createInstance({ name: `marmot-${pubkey}` });

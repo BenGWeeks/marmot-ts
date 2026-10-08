@@ -52,6 +52,8 @@ for await (const rumors of history.subscribe({ kinds: [9], limit: 100 })) {
 
 Both self-sent messages (via `client.groups.send`) and ingested messages (via `group.ingest`) flow through the same subscription, so the UI stays consistent without a separate "echo" path.
 
+Two details of the current implementation: `limit` applies only to the initial snapshot, so the timeline grows as new rumors arrive; and a rumor saved while your loop body is still running (between iterations) is not added to that subscription's timeline. Re-query with `queryRumors` if you need an exact view.
+
 ## Pagination — `createPaginatedLoader`
 
 For infinite scroll, `createPaginatedLoader(filter?)` yields one page per iteration (default 50 per page), walking backwards through history:
@@ -71,9 +73,29 @@ async function loadOlder() {
 - `purgeMessages()` — clear all stored rumors for the group.
 - Emits `rumor` (a rumor was saved) and `cleared` (history purged).
 
+## Fork-invalidated messages
+
+History stores a message as soon as it decrypts. If a later convergence rewind abandons the branch that message arrived on, `group.ingest` yields `{ kind: "invalidated", payload }`, but **the message is not removed from history**. `GroupRumorHistory` has no remove method and does not react to invalidation, so an invalidated message stays in `queryRumors`, `subscribe`, and the paginated loader until you delete it.
+
+The spec requires that a change which lost branch selection not remain visible to the application as completed ([`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md)). Until the library handles this, retract invalidated messages yourself: run your own ingest loop (see [Fork invalidation](/client/marmot-group#fork-invalidation)), decode the rumor id with `deserializeApplicationData(payload).id`, and remove that key from your backend store. `KeyValueRumorHistoryBackend` keys rumors by id, so removing that key from the `GenericKeyValueStore` you passed it deletes the message. Note that `client.groups.connect()` / `connectAll()` do not surface `invalidated` results.
+
+```typescript
+import { deserializeApplicationData } from "@internet-privacy/marmot-ts";
+
+// `verifiedEvents`: kind 445 events you fetched and signature-checked yourself
+for await (const result of group.ingest(verifiedEvents)) {
+  if (result.kind === "invalidated" && result.payload) {
+    const { id } = deserializeApplicationData(result.payload);
+    await storeForGroup(group.id).removeItem(id); // the store behind KeyValueRumorHistoryBackend
+  }
+}
+```
+
+Membership and metadata changes withdrawn the same way arrive as `stateInvalidated` / `stateRevalidated`; after applying them, call `group.session.acknowledgeConvergenceEffect(result)`. Open subscriptions do not see the removal until they re-query.
+
 ## Retention and backfill
 
-History is independent of MLS epoch secrets. Relay **backfill** (re-ingesting old kind 445 events) can only decrypt epochs still within the engine's bounded rewind horizon; messages from pruned epochs surface as `unreadable` during `ingest` and cannot be recovered — but anything already written to history stays available. Use the `message-retention` group metadata field (see [Proposals](/client/proposals#updating-metadata)) to communicate the intended retention window to members.
+History is independent of MLS epoch secrets. Relay **backfill** (re-ingesting old kind 445 events) can only decrypt epochs still within the engine's bounded rewind horizon; messages from pruned epochs surface as `unreadable` during `ingest` and cannot be recovered — but anything already written to history stays available. The `message-retention` group metadata field (see [Proposals](/client/proposals#updating-metadata)) is a group request for disappearing messages: a nonzero value asks members to delete each message's plaintext once its `created_at` plus the retention seconds pinned at that message's epoch has passed ([`app-components/message-retention-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/message-retention-v1.md)). `GroupRumorHistory` does not enforce this. If `group.groupData?.messageRetention` is greater than `0n`, delete expired rumors from your backend yourself.
 
 ## Next steps
 

@@ -12,7 +12,7 @@ Most operations have a convenience method on [`client.groups`](/client/marmot-cl
 group.id; // Uint8Array — the MLS group_id
 group.idStr; // hex string of group.id
 group.state; // the underlying MLS ClientState (advanced API)
-group.relays; // string[] — the group's Nostr relays
+group.relays; // string[] | undefined — the group's Nostr relays
 ```
 
 ### Group metadata — `group.groupData`
@@ -25,9 +25,9 @@ data?.name;
 data?.description;
 data?.adminPubkeys; // string[]
 data?.relays; // string[]
-data?.nostrGroupId; // Uint8Array — the kind 445 routing tag (#h)
+data?.nostrGroupId; // Uint8Array | undefined — the kind 445 routing tag (#h)
 data?.avatarUrl;
-data?.messageRetention; // seconds; 0 = retain indefinitely
+data?.messageRetention; // bigint seconds; 0n = disappearing messages disabled
 ```
 
 ### Membership and details — `group.info`
@@ -87,33 +87,67 @@ group.on("applicationMessage", (data) => {
 });
 ```
 
-To feed inbound traffic, subscribe to the group's relays for kind 445 events and drive `group.ingest`. The async generator advances MLS processing and yields a **disposition** per envelope:
+To feed inbound traffic, connect the group through the client. `client.groups.connect()` fetches the group's kind 445 backlog, opens a live subscription, checks each event's signature and `h` tag, and drains everything through `group.ingest()` (see [Receiving group traffic](/client/marmot-client#receiving-group-traffic)):
 
 ```typescript
-import { bytesToHex } from "@noble/hashes/utils.js";
-
-const sub = client.network.subscription(group.relays, [
-  { kinds: [445], "#h": [bytesToHex(group.groupData.nostrGroupId)] },
-]);
-
-sub.subscribe({
-  next: async (event) => {
-    for await (const result of group.ingest([event])) {
-      switch (result.kind) {
-        case "processed":
-          break; // commits/proposals applied; app messages arrive via the event above
-        case "deferred":
-          break; // can't process yet — retry when more state arrives
-        case "unreadable":
-          console.warn("dropped an unreadable event");
-          break;
-      }
-    }
-  },
-});
+const connection = await client.groups.connect(group.id);
+client.groups.on("unreadable", (groupId, event) =>
+  console.warn("unreadable", event.id),
+);
+// later: connection.unsubscribe();
 ```
 
-Other dispositions include `skipped`, `rejected`, `invalidated`, `autoCommit`, and `removed`. See [`DispositionedIngestResult`](https://github.com/marmot-protocol/marmot-ts/blob/master/src/engine/types.ts).
+### Ingesting events manually
+
+If you run your own subscription, verify each event before ingesting it (`group.ingest` does not check signatures or the `h` tag) and fully drain one `ingest()` generator before starting the next. The generator advances MLS processing and yields a **disposition** per event:
+
+```typescript
+import { verifyEvent } from "applesauce-core/helpers/event";
+import type { NostrEvent } from "applesauce-core/helpers/event";
+
+async function ingestBatch(events: NostrEvent[]) {
+  const trusted = events.filter((event) => verifyEvent(event));
+  for await (const result of group.ingest(trusted)) {
+    switch (result.kind) {
+      case "processed":
+        break; // commits/proposals applied; app messages arrive via the event above
+      case "deferred":
+        break; // held in the ingestion pool and retried automatically
+      case "invalidated":
+        break; // see "Fork invalidation" below
+      case "unreadable":
+        console.warn("dropped an unreadable event");
+        break;
+    }
+  }
+}
+```
+
+Other kinds: `skipped`, `rejected`, `refused` (ingestion pool at capacity), `autoCommit`, `removed`, `appliedNotifications`, and `stateInvalidated` / `stateRevalidated` (a rewind withdrew or restored the state notifications of a commit). See [`DispositionedIngestResult`](https://github.com/marmot-protocol/marmot-ts/blob/master/src/client/session/group-session.ts).
+
+### Fork invalidation
+
+Marmot delivers messages eagerly. If convergence later abandons the branch a message arrived on, `ingest` yields `{ kind: "invalidated", payload }`, where `payload` holds the message's app payload bytes when they are available. The message was already emitted through `applicationMessage` and written to [history](/client/history#fork-invalidated-messages), and the library does not remove it. Retract it from your UI and history yourself.
+
+In the same way, `stateInvalidated` and `stateRevalidated` withdraw or restore the membership and metadata changes of a commit. After your app has applied one, record it with `group.session.acknowledgeConvergenceEffect(result)`.
+
+```typescript
+// inside ingestBatch() from the example above
+for await (const result of group.ingest(trusted)) {
+  if (result.kind === "invalidated" && result.payload) {
+    const rumor = deserializeApplicationData(result.payload);
+    removeFromTimeline(rumor.id);
+  } else if (
+    result.kind === "stateInvalidated" ||
+    result.kind === "stateRevalidated"
+  ) {
+    refreshGroupDetails(group);
+    await group.session.acknowledgeConvergenceEffect(result);
+  }
+}
+```
+
+The spec requires that a change which lost branch selection not remain visible as completed ([`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md)). These results are only visible when you call `ingest` yourself; `connect()` / `connectAll()` do not surface them.
 
 ## Proposals and commits
 
@@ -122,15 +156,19 @@ Use the [`Proposals`](/client/proposals) builders with `client.groups.commit`, o
 ```typescript
 import { Proposals } from "@internet-privacy/marmot-ts";
 
+// Builders that return several proposals are resolved against the current
+// state first, then committed.
+const context = group.session.proposalContext();
+
 // Remove a member (admins only)
-await client.groups.commit(group.id, {
-  extraProposals: [Proposals.proposeRemoveUser(memberPubkey)],
-});
+const removals = await Proposals.proposeRemoveUser(memberPubkey)(context);
+await client.groups.commit(group.id, { extraProposals: removals });
 
 // Update metadata
-await client.groups.commit(group.id, {
-  extraProposals: [Proposals.proposeUpdateMetadata({ name: "New name" })],
-});
+const updates = await Proposals.proposeUpdateMetadata({ name: "New name" })(
+  group.session.proposalContext(),
+);
+await client.groups.commit(group.id, { extraProposals: updates });
 ```
 
 A standalone (uncommitted) proposal can be broadcast with `group.propose(action)` / `group.sendProposal(proposal)`, and a key rotation with `group.selfUpdate()`.
@@ -166,14 +204,16 @@ The only recovery for a Welcome that was never delivered (before or after a rest
 
 `MarmotGroup` extends `EventEmitter`. Available events:
 
-| Event                | Payload       | Fires when                                                        |
-| -------------------- | ------------- | ----------------------------------------------------------------- |
-| `applicationMessage` | `Uint8Array`  | A decrypted application message is received                       |
-| `stateChanged`       | `ClientState` | Group state advances (commit, proposal, message)                  |
-| `stateSaved`         | `MarmotGroup` | State was persisted to the store                                  |
-| `removed`            | `MarmotGroup` | An inbound commit removed **this** member (admin or self-removal) |
-| `destroyed`          | `MarmotGroup` | The group's local state was destroyed                             |
-| `historyError`       | `Error`       | Best-effort history persistence failed (non-blocking)             |
+| Event                | Payload                              | Fires when                                                                   |
+| -------------------- | ------------------------------------ | ---------------------------------------------------------------------------- |
+| `applicationMessage` | `Uint8Array`                         | A decrypted application message is received                                  |
+| `stateChanged`       | `ClientState`                        | Group state advances (commit, proposal, message)                             |
+| `stateSaved`         | `MarmotGroup`                        | State was persisted to the store                                             |
+| `removed`            | `MarmotGroup`                        | An inbound commit removed **this** member (admin or self-removal)            |
+| `destroyed`          | `MarmotGroup`                        | The group's local state was destroyed                                        |
+| `disbanded`          | `(MarmotGroup, GroupDisbandedEvent)` | The group was disbanded (terminal; emitted once)                             |
+| `historyError`       | `Error`                              | Best-effort history persistence failed (non-blocking)                        |
+| `historyChanged`     | `MarmotGroup`                        | Ingest grew the fork-history tree (see [Fork History](/client/fork-history)) |
 
 ```typescript
 group.on("removed", (g) => {

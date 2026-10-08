@@ -1,12 +1,12 @@
 # Client Module
 
-The Client module (`marmot-ts/client`) provides a high-level, production-ready implementation for building Marmot applications.
+The Client module (`@internet-privacy/marmot-ts/client`) provides a high-level, production-ready implementation for building Marmot applications.
 
 ## What's in the Client Module
 
 - **MarmotClient:** Multi-group orchestration with lifecycle management
 - **MarmotGroup:** Group operations (messaging, proposals, commits) — a facade over the engine
-- **GroupsManager:** Group creation, loading, watching, leaving, and destruction via `client.groups`
+- **GroupsManager:** Group creation, invite/send/commit, relay sync (`connect`/`connectAll`), loading, watching, leaving, and destruction via `client.groups`
 - **KeyPackageManager:** Key package creation, publishing, watching, and rotation via `client.keyPackages`
 - **InviteManager:** Gift-wrap ingestion, decryption, and unread tracking via `client.invites`
 - **History Management:** Optional message storage with querying and pagination
@@ -68,6 +68,16 @@ Key/value stores for persisting serialized group state, key packages, and invite
 
 Recommended patterns for commits, state persistence, relay selection, and more.
 
+### [Fork History](./fork-history)
+
+Inspecting the full-fork history tree and convergence decisions.
+
+### [UI Frameworks](./ui-frameworks)
+
+Consuming the manager async generators from React, Svelte, Solid, Vue and vanilla JS.
+
+### [API Reference](pathname:///reference/index.html)
+
 Complete API documentation for all Client module classes and functions.
 
 ## When to Use Client
@@ -91,18 +101,22 @@ import {
   deserializeApplicationData,
 } from "@internet-privacy/marmot-ts";
 
-// Create client
+// Create client (`clientId`: persisted random 32-byte hex key package slot id)
 const client = new MarmotClient({
-  signer,
+  signer, // must support nip44
   network,
   groupStateStore,
   keyPackageStore,
+  clientId,
 });
+const myPubkey = await client.signer.getPublicKey();
 
-// Create group
+// Backfill + live ingest for every loaded group (and groups created/joined later)
+const sync = client.groups.connectAll();
+
+// Create group (the creator is always an admin)
 const group = await client.groups.create("My Group", {
   relays: ["wss://relay.example.com"],
-  adminPubkeys: [myPubkey],
 });
 
 // Send message
@@ -128,7 +142,7 @@ Generic type system ensures type consistency between client and groups.
 
 ### Pluggable Components
 
-- Storage backends (in-memory, IndexedDB, filesystem)
+- Storage backends (any `GenericKeyValueStore`; in-memory and encrypted wrappers ship in `/extra`, IndexedDB/filesystem/SQLite are app-provided)
 - Network interfaces (nostr-tools, NDK, etc.)
 - History implementations (custom storage)
 - Crypto providers
@@ -142,4 +156,4 @@ Generic type system ensures type consistency between client and groups.
 
 ### Protocol Compliance
 
-Implements Marmot v2 (MIP-00 through MIP-03, with MIP-04 media in progress) and is wire-compatible with the darkmatter reference implementation.
+Implements the [Marmot v2 specification](https://github.com/marmot-protocol/marmot) (encrypted media v1; v2 media not yet implemented) and is wire-compatible with the darkmatter reference implementation.

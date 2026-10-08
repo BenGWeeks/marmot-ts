@@ -52,8 +52,13 @@ const result = await createGroup({
 
 - **creatorKeyPackage:** Your complete key package (public + private)
 - **components:** Initial app components seeded into the `app_data_dictionary`
+- **requiredComponentIds:** (Optional) Component ids advertised in the `app_components` entry. Defaults to the ids of `components`. The default group component ids (group-profile `0x8001`, admin-policy `0x8003`, account-identity-proof `0x8009`, group-lifecycle `0x800c`) are always included.
 - **ciphersuiteImpl:** Cryptographic implementation
 - **extensions:** (Optional) Additional MLS group context extensions
+
+::: warning
+`createGroup` does not validate your components. The spec requires the initial admin policy to contain the creator's account identity, and a Nostr-routed group to include `transport.nostr.routing.v1` ([`protocol-core/group-setup.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/group-setup.md)). Include an `adminPolicyEntry` with your pubkey and a `nostrRoutingEntry`. Without routing, `getNostrGroupIdHex` and `createGroupEvent` throw.
+:::
 
 ### Returns
 
@@ -81,12 +86,14 @@ const { clientState } = await createSimpleGroup(
 );
 ```
 
+`createSimpleGroup` always makes the creator an admin, but it only adds the `transport.nostr.routing.v1` component (with a fresh random `nostrGroupId`) when `relays` is non-empty.
+
 ## Group Initialization Process
 
 When you create a group:
 
-1. **Creates MLS Group:** Initializes MLS group with creator as sole member
-2. **Seeds Components:** Writes the initial app components into the `app_data_dictionary` and declares the Marmot `required_capabilities`
+1. **Creates MLS Group:** Initializes MLS group with creator as sole member, using a private random 32-byte MLS group id (distinct from the public `nostrGroupId`)
+2. **Seeds Components:** Writes the `app_components` entry, your components, and `group.lifecycle.v1` (`active`, unless you supplied one) into the `app_data_dictionary`, and declares the Marmot `required_capabilities` (including the `app_data_update` proposal, `0x0008`)
 3. **Generates Secrets:** Creates initial encryption keys
 4. **Returns State:** Provides ClientState for ongoing operations
 
@@ -146,8 +153,6 @@ console.log("Group created with ID:", getNostrGroupIdHex(clientState));
 
 ## Group Metadata
 
-Every Marmot group has associated metadata:
-
 In Marmot v2 group metadata lives in versioned app components (the
 `app_data_dictionary` MLS extension). Read it as a single projection with
 `getMarmotGroupView`:
@@ -162,7 +167,13 @@ console.log(view?.description); // "A group for..."
 console.log(view?.relays); // ["wss://..."]
 console.log(view?.adminPubkeys); // ["admin-hex"]
 console.log(view?.avatarUrl); // "https://..." (group.avatar-url.v1)
+console.log(view?.nostrGroupId); // Uint8Array | undefined (routing component)
+console.log(view?.encryptedMedia); // encrypted-media policy, if set
+console.log(view?.messageRetention); // message-retention policy, if set
+console.log(view?.protocolLifecycle); // e.g. "active"
 ```
+
+`getMarmotGroupView` returns `null` when the group has none of the profile, admin-policy and routing components.
 
 See [Protocol Constants & Concepts](./protocol) for the app-component model.
 

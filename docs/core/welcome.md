@@ -11,7 +11,7 @@ When someone is added to a group, they receive a Welcome message containing:
 - Member list
 - Group context (including the app-component dictionary)
 
-The Welcome allows them to decrypt past messages from the current epoch and participate in the group.
+The Welcome gives them the secrets for the epoch created by the commit that added them. They can read messages from that epoch onward, but nothing earlier.
 
 ## Creating Welcome Rumors
 
@@ -27,7 +27,7 @@ const welcomeRumor = createWelcomeRumor({
   welcome, // Welcome from MLS commit
   groupRelays, // Non-empty relay URLs for group message fetch
   keyPackageEventId, // Required: 32-byte hex KeyPackage event id (e tag)
-  author: myEphemeralPubkey, // Nostr pubkey for this rumor
+  author: await senderSigner.getPublicKey(), // inviter's account pubkey; must match the seal signer
 });
 
 // welcomeRumor is kind 444, ready to be gift-wrapped
@@ -52,15 +52,17 @@ The rumor MUST NOT include an `encoding` tag. Content is always standard base64.
 Welcome messages are wrapped in NIP-59 gift wraps (kind 1059 → kind 13 seal → kind 444 rumor) and published to the invitee's inbox relay set:
 
 ```typescript
-import { createWelcomeRumor } from "@internet-privacy/marmot-ts";
-import { createGiftWrap } from "applesauce-core/nip59";
+import {
+  createWelcomeRumor,
+  createGiftWrap,
+} from "@internet-privacy/marmot-ts";
 
 // 1. Create welcome rumor
 const welcomeRumor = createWelcomeRumor({
   welcome,
   groupRelays,
   keyPackageEventId: kpEventId,
-  author: myEphemeralPubkey,
+  author: await senderSigner.getPublicKey(), // must match the seal signer below
 });
 
 // 2. Wrap in gift wrap addressed to the invitee
@@ -74,6 +76,8 @@ const giftWrap = await createGiftWrap({
 await network.publish(recipientInboxRelays, giftWrap);
 ```
 
+The rumor and the kind 13 seal are authored by the inviter's account key. Only the outer kind 1059 wrap uses an ephemeral key, which NIP-59 generates for you. If the recipient has no kind 10050 list, the spec only lets the sender use contextual relay hints ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md)). The marmot-ts client falls back to the group relays in that case.
+
 ## Extracting Welcome Messages
 
 When you receive a gift wrap with a Welcome:
@@ -82,7 +86,8 @@ When you receive a gift wrap with a Welcome:
 import { getWelcome } from "@internet-privacy/marmot-ts";
 import { unlockGiftWrap } from "applesauce-common/helpers/gift-wrap";
 
-// 1. Unwrap gift wrap (validates recipient binding)
+// 1. Verify the outer kind 1059 (NIP-01 id/sig) and that its single `p` tag is your pubkey,
+//    then unwrap. (client.invites does these checks for you.)
 const rumor = await unlockGiftWrap(giftWrapEvent, mySigner);
 
 // 2. Extract and validate the Welcome (e tag, relays tag, MLS decode)
@@ -104,6 +109,8 @@ import {
 
 const welcome = getWelcome(welcomeRumor);
 const keyPackage = await keyPackageStore.get(keyPackageRef);
+if (!keyPackage?.privatePackage)
+  throw new Error("No local private key package");
 
 const groupInfo = await readWelcomeGroupInfo({
   welcome,
@@ -127,13 +134,22 @@ Use the client API to join from an unwrapped kind 444 rumor:
 const { group } = await client.joinGroupFromWelcome({ welcomeRumor });
 ```
 
-The client finds the matching local KeyPackage, validates member identity proofs, and persists the resulting group state.
+The client finds the matching local KeyPackage, validates member identity proofs, persists the resulting group state, and marks the consumed KeyPackage as used.
+
+After joining:
+
+- Call `await group.selfUpdate()` as soon as practical, before sending messages, to rotate the leaf key for forward secrecy ([`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)). The client does not do this automatically.
+- Rotate the consumed KeyPackage with `client.keyPackages.rotate(ref)`. You can find it with `(await client.keyPackages.list()).filter((p) => p.used)`.
+
+::: warning Spec deviation
+[`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md) requires consumed KeyPackage private material to be deleted. `joinGroupFromWelcome` only marks it used; call `client.keyPackages.rotate(ref)` or `client.keyPackages.remove(ref)` to delete it.
+:::
 
 ## Welcome Ordering
 
-Per `protocol-core/joining.md`, commits MUST be published and acknowledged **before** sending Welcome messages (except initial one-member group creation).
+Per [`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md), for any Add after group creation the inviter MUST wait for the commit's publish obligation to succeed (at least one relay accepts it with NIP-01 `OK`) before sending Welcomes. Founding creation, including founding invitees, is exempt: there are no existing peers to fork.
 
-**Why?** The Welcome references the commit that added the member. If the Welcome arrives first, the new member can't fetch the commit and will fail to join.
+**Why?** The Welcome puts the new member directly into the post-commit epoch. If that commit never reaches relays (or loses convergence), the new member is stranded on an epoch existing members never adopt.
 
 **Correct order:**
 

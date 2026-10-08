@@ -6,17 +6,16 @@ producing competing branches. The convergence engine deterministically picks one
 canonical branch, but the others still happened.
 
 marmot-ts retains the **whole fork tree** — every group state ever observed, the
-canonical branch and every abandoned fork — so you can inspect, debug, and (with
-infinite retention) re-converge onto branches of any age. This page covers the
-retention policy and the customer-facing API for reading the tree.
+canonical branch and every abandoned fork — so you can inspect and debug forks,
+and re-converge onto a branch that wins within the protocol's rollback horizon.
+This page covers the retention policy and the customer-facing API for reading the
+tree.
 
-> [!WARNING] Forward secrecy
-> Retaining old group states keeps the MLS secrets for those epochs. The deeper
-> the retention (and especially `maxRewindCommits: Infinity`), the more of the
-> group's history a single device compromise exposes — this deliberately trades
-> away MLS forward secrecy. Keep the default bounded horizon unless you have a
-> specific reason (audit, debugging, archival) to retain more, and store the
-> rewind backend encrypted at rest.
+::: warning Forward secrecy
+Retaining old group states keeps the MLS secrets for those epochs, so a device
+compromise exposes more of the group's history than MLS alone would. Store the
+rewind backend encrypted at rest.
+:::
 
 ## The history tree
 
@@ -37,26 +36,38 @@ state rehydrates independently on demand.
 
 ## Retention policy
 
-The rollback horizon is the convergence policy's `maxRewindCommits`. It bounds how
-far back a fork may diverge and still be eligible for re-convergence, and how much
-retained state the engine keeps for that purpose. Set it on the client (it applies
-to every group):
+The rollback horizon is the convergence policy's `maxRewindCommits` (5 in
+convergence policy v1). It bounds how far back a fork may diverge and still be
+eligible for re-convergence, and how much retained state the engine keeps for that
+purpose.
+
+`maxRewindCommits` is a **pinned protocol constant**
+([`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md)).
+Every client must use the same value. A client with a different horizon can select
+a different canonical branch than its peers, and the group forks. Production
+clients must leave `MarmotClient`'s `convergencePolicy` option at its default,
+`DEFAULT_CONVERGENCE_POLICY`.
+
+The option exists only for test harnesses and forensic or debug tools that never
+send to a real group:
 
 ```ts
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
 import { DEFAULT_CONVERGENCE_POLICY } from "@internet-privacy/marmot-ts/core";
 
+// Debug/forensics only. Non-conformant: never use in a client that sends.
 const client = new MarmotClient({
   // ...stores, signer, network...
   convergencePolicy: {
     ...DEFAULT_CONVERGENCE_POLICY,
-    maxRewindCommits: Infinity, // preserve the whole MLS history
+    maxRewindCommits: Infinity,
   },
 });
 ```
 
-With `Infinity`, nothing is pruned, no fork is ever too old to re-converge onto,
-and a late commit is never dropped as beyond-horizon.
+With a non-default horizon, this client may adopt a branch its peers consider out
+of range (or reject one they adopt), so its view of the group can diverge from
+everyone else's.
 
 ### Persistence
 
@@ -73,7 +84,7 @@ Every [`MarmotGroup`](./marmot-group) exposes two views.
 
 ### `group.forkTree` — live queries
 
-The live [`GroupHistoryTree`](./marmot-group) for ad-hoc traversal:
+The live [`GroupHistoryTree`](https://github.com/marmot-protocol/marmot-ts/blob/master/src/engine/history-tree.ts) for ad-hoc traversal:
 
 ```ts
 const tree = group.forkTree;

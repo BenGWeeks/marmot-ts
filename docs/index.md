@@ -26,5 +26,5 @@ features:
   - title: Pluggable Architecture
     details: Bring your own storage, network layer, and history backends - works with any Nostr client library
   - title: Protocol Compliant
-    details: Implements Marmot v2 (MIP-00 through MIP-03) and is wire-compatible with the darkmatter reference implementation
+    details: Implements the Marmot v2 specification (identity, key packages, group setup, joining, messaging, convergence) and is wire-compatible with the darkmatter reference implementation
 ---
