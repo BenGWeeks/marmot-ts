@@ -1,8 +1,3 @@
----
-heroImage: /images/marmot-development.png
-heroImageAlt: A pixel-art marmot engineer with a wrench standing before glowing gears and pipes in a burrow
----
-
 # Architecture
 
 ## Overview
