@@ -62,7 +62,18 @@ import {
 } from "./group/group-image-transport.js";
 import type { WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { GroupFactory, type CreateGroupOptions } from "./group-factory.js";
+import {
+  DEFAULT_BACKFILL_MAX_PAGES,
+  DEFAULT_BACKFILL_PAGE_SIZE,
+  DEFAULT_BACKFILL_SLACK_SECONDS,
+  backfillCursorKey,
+  encodeBackfillCursor,
+  fetchPagedBackfill,
+  nextBackfillCursor,
+  readBackfillCursor,
+} from "./group-backfill.js";
 import { GroupRegistry } from "./group-registry.js";
+import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
 import type { GroupRuntime } from "./runtime/group-runtime.js";
 import type {
   GroupPublishResult,
@@ -126,6 +137,31 @@ export interface ConnectOptions {
    * just as it cannot send).
    */
   fallbackRelays?: string[];
+  /**
+   * Overlap, in seconds, re-fetched behind a group's stored backfill cursor to
+   * absorb relay clock skew and late-propagating events. Defaults to 600
+   * (10 minutes).
+   */
+  backfillSlackSeconds?: number;
+  /** `limit` of each backfill page request. Defaults to 500. */
+  backfillPageSize?: number;
+  /**
+   * Maximum pages fetched from each relay per connect. When a relay hits the
+   * cap the fetched events are still ingested, but the cursor is not advanced,
+   * so the remainder is retried on the next connect. Defaults to 50.
+   */
+  backfillMaxPages?: number;
+}
+
+function positiveInteger(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1)
+    throw new Error(`${name} must be a positive integer`);
+  return value;
 }
 
 /** Options for creating a new GroupsManager */
@@ -282,7 +318,7 @@ export class GroupsManager<
   readonly #admissions = new Map<
     string,
     {
-      tail: Promise<void>;
+      tail: Promise<unknown>;
       seen: BoundedIdCache;
       connections: number;
       pending: number;
@@ -293,6 +329,8 @@ export class GroupsManager<
   readonly #factory: GroupFactory<THistory, TMedia>;
   /** The injectable event verifier gating the 445 drain (SEC-01). */
   readonly #verifyEvent: VerifyEventMethod;
+  /** Holds each group's backfill cursor alongside its ingest state. */
+  readonly #ingestStateStore: GenericKeyValueStore<Uint8Array>;
 
   constructor(options: GroupsManagerOptions<THistory, TMedia>) {
     super();
@@ -308,6 +346,8 @@ export class GroupsManager<
     this.network = options.network;
     this.cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
     this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
+    this.#ingestStateStore =
+      options.ingestStateStore ?? new InMemoryKeyValueStore<Uint8Array>();
 
     this.#registry = new GroupRegistry<THistory, TMedia>({
       store: options.store,
@@ -965,9 +1005,27 @@ export class GroupsManager<
     options?.signal?.addEventListener("abort", unsubscribe, { once: true });
     group.once("disbanded", unsubscribe);
     const seen = record.seen;
-    const drain = async (events: NostrEvent[]): Promise<void> => {
+    type DrainOutcome = {
+      /** Events that passed the trust boundary and were handed to ingest. */
+      trusted: NostrEvent[];
+      /** Ids the group still holds only in memory (deferred / refused). */
+      heldIds: Set<string>;
+      /** Whether the batch was not fully drained (ingest threw or cancelled). */
+      failed: boolean;
+    };
+    const failedDrain = (): DrainOutcome => ({
+      trusted: [],
+      heldIds: new Set(),
+      failed: true,
+    });
+    const drain = async (events: NostrEvent[]): Promise<DrainOutcome> => {
+      const outcome: DrainOutcome = {
+        trusted: [],
+        heldIds: new Set(),
+        failed: false,
+      };
       const fresh = events.filter((event) => !seen.has(event.id));
-      if (!fresh.length) return;
+      if (!fresh.length) return outcome;
 
       // Trust boundary (SEC-01/WIRE-02): verify signature and `h` tag
       // cardinality BEFORE any event reaches group.ingest() or occupies the
@@ -985,19 +1043,31 @@ export class GroupsManager<
         seen.add(event.id);
         trusted.push(event);
       }
-      if (!trusted.length) return;
+      outcome.trusted = trusted;
+      if (!trusted.length) return outcome;
 
       // Result delivery uses the facade event only; consuming yields as well
-      // would duplicate live results and still miss timer-driven results.
-      for await (const result of group.ingest(trusted)) void result;
+      // would duplicate live results and still miss timer-driven results. The
+      // yields are read only to track each event's latest disposition:
+      // deferred/refused events live only in the in-memory pool and must be
+      // re-fetchable.
+      for await (const result of group.ingest(trusted)) {
+        if ("event" in result) {
+          if (result.kind === "deferred" || result.kind === "refused")
+            outcome.heldIds.add(result.event.id);
+          else outcome.heldIds.delete(result.event.id);
+        }
+      }
+      return outcome;
     };
-    const admit = (events: NostrEvent[]) => {
-      if (cancelled) return Promise.resolve();
+    const admit = (events: NostrEvent[]): Promise<DrainOutcome> => {
+      if (cancelled) return Promise.resolve(failedDrain());
       record.pending++;
       const work = record.tail
         .then(() => drain(events))
         .catch((err) => {
           log("connect: ingest failed for group %s: %o", group.idStr, err);
+          return failedDrain();
         })
         .finally(() => {
           record.pending--;
@@ -1008,9 +1078,65 @@ export class GroupsManager<
     };
 
     // Backfill before subscribing (mirrors the proven attach order): the backlog
-    // ingests as one batch so out-of-order commits resolve together.
+    // ingests as one batch so out-of-order commits resolve together. The fetch
+    // is bounded by the group's cursor (newest ingested event from the last
+    // complete backfill) minus a slack window, and paged so relay result caps
+    // cannot silently truncate it. With no cursor the full history is paged.
     try {
-      await admit(await this.network.request(relays, filter));
+      const slack =
+        options?.backfillSlackSeconds ?? DEFAULT_BACKFILL_SLACK_SECONDS;
+      if (!Number.isFinite(slack) || slack < 0)
+        throw new Error("backfillSlackSeconds must be a non-negative number");
+      const pageSize = positiveInteger(
+        options?.backfillPageSize,
+        DEFAULT_BACKFILL_PAGE_SIZE,
+        "backfillPageSize",
+      );
+      const maxPages = positiveInteger(
+        options?.backfillMaxPages,
+        DEFAULT_BACKFILL_MAX_PAGES,
+        "backfillMaxPages",
+      );
+      const nowSeconds = () => Math.floor(Date.now() / 1000);
+      const cursor = await readBackfillCursor(
+        this.#ingestStateStore,
+        group.idStr,
+        nowSeconds(),
+      );
+      const backfill = await fetchPagedBackfill(this.network, relays, filter, {
+        since:
+          cursor === undefined
+            ? undefined
+            : Math.max(0, Math.floor(cursor - slack)),
+        pageSize,
+        maxPages,
+      });
+      const drained = await admit(backfill.events);
+
+      // Advance the cursor only once the whole backfill window was fetched AND
+      // ingested; otherwise the next connect re-reads from the old cursor.
+      if (backfill.complete && !drained.failed) {
+        const next = nextBackfillCursor({
+          ingested: drained.trusted,
+          heldIds: drained.heldIds,
+          previous: cursor,
+          nowSeconds: nowSeconds(),
+        });
+        if (next !== undefined && next !== cursor) {
+          try {
+            await this.#ingestStateStore.setItem(
+              backfillCursorKey(group.idStr),
+              encodeBackfillCursor(next),
+            );
+          } catch (err) {
+            log(
+              "connect: failed to persist cursor for %s: %o",
+              group.idStr,
+              err,
+            );
+          }
+        }
+      }
 
       // Backfill may itself have selected terminal state. Never seed a live route
       // after the durable tombstone has won.
