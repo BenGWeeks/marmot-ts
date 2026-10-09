@@ -66,11 +66,17 @@ import {
   DEFAULT_BACKFILL_MAX_PAGES,
   DEFAULT_BACKFILL_PAGE_SIZE,
   DEFAULT_BACKFILL_SLACK_SECONDS,
+  type BackfillProgress,
+  type PagedBackfillResult,
   backfillCursorKey,
+  backfillProgressKey,
   encodeBackfillCursor,
+  encodeBackfillProgress,
   fetchPagedBackfill,
   nextBackfillCursor,
+  oldestCreatedAt,
   readBackfillCursor,
+  readBackfillProgress,
 } from "./group-backfill.js";
 import { GroupRegistry } from "./group-registry.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
@@ -320,6 +326,8 @@ export class GroupsManager<
     {
       tail: Promise<unknown>;
       seen: BoundedIdCache;
+      /** Set once an admitted batch fails to ingest; never cleared. */
+      ingestFailed: boolean;
       connections: number;
       pending: number;
       cleanup: () => void;
@@ -977,6 +985,7 @@ export class GroupsManager<
       admission = {
         tail: Promise.resolve(),
         seen: new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY),
+        ingestFailed: false,
         connections: 0,
         pending: 0,
         cleanup: () => group.off("ingestResult", forward),
@@ -1006,25 +1015,33 @@ export class GroupsManager<
     group.once("disbanded", unsubscribe);
     const seen = record.seen;
     type DrainOutcome = {
-      /** Events that passed the trust boundary and were handed to ingest. */
+      /**
+       * Events that passed the trust boundary: those handed to ingest now and
+       * those an earlier batch for this group already admitted.
+       */
       trusted: NostrEvent[];
-      /** Ids the group still holds only in memory (deferred / refused). */
-      heldIds: Set<string>;
-      /** Whether the batch was not fully drained (ingest threw or cancelled). */
+      /** Whether this or an earlier admitted batch was not fully ingested. */
       failed: boolean;
     };
-    const failedDrain = (): DrainOutcome => ({
-      trusted: [],
-      heldIds: new Set(),
-      failed: true,
-    });
     const drain = async (events: NostrEvent[]): Promise<DrainOutcome> => {
+      // `seen` is shared by every connection to this group, so a backfill can
+      // re-fetch events an earlier batch already ingested. They count towards
+      // the backfill cursor unless an admitted batch has failed. A same-id
+      // copy only counts if it passes the trust boundary itself: the cache
+      // vouches for the id, not for this copy's `created_at`.
       const outcome: DrainOutcome = {
         trusted: [],
-        heldIds: new Set(),
-        failed: false,
+        failed: record.ingestFailed,
       };
-      const fresh = events.filter((event) => !seen.has(event.id));
+      const fresh: NostrEvent[] = [];
+      for (const event of events) {
+        if (!seen.has(event.id)) fresh.push(event);
+        else if (
+          safeVerifyEvent(this.#verifyEvent, event) &&
+          getSingletonTagValue(event, "h") === h
+        )
+          outcome.trusted.push(event);
+      }
       if (!fresh.length) return outcome;
 
       // Trust boundary (SEC-01/WIRE-02): verify signature and `h` tag
@@ -1043,31 +1060,23 @@ export class GroupsManager<
         seen.add(event.id);
         trusted.push(event);
       }
-      outcome.trusted = trusted;
+      outcome.trusted.push(...trusted);
       if (!trusted.length) return outcome;
 
       // Result delivery uses the facade event only; consuming yields as well
-      // would duplicate live results and still miss timer-driven results. The
-      // yields are read only to track each event's latest disposition:
-      // deferred/refused events live only in the in-memory pool and must be
-      // re-fetchable.
-      for await (const result of group.ingest(trusted)) {
-        if ("event" in result) {
-          if (result.kind === "deferred" || result.kind === "refused")
-            outcome.heldIds.add(result.event.id);
-          else outcome.heldIds.delete(result.event.id);
-        }
-      }
+      // would duplicate live results and still miss timer-driven results.
+      for await (const result of group.ingest(trusted)) void result;
       return outcome;
     };
     const admit = (events: NostrEvent[]): Promise<DrainOutcome> => {
-      if (cancelled) return Promise.resolve(failedDrain());
+      if (cancelled) return Promise.resolve({ trusted: [], failed: true });
       record.pending++;
       const work = record.tail
         .then(() => drain(events))
-        .catch((err) => {
+        .catch((err): DrainOutcome => {
           log("connect: ingest failed for group %s: %o", group.idStr, err);
-          return failedDrain();
+          record.ingestFailed = true;
+          return { trusted: [], failed: true };
         })
         .finally(() => {
           record.pending--;
@@ -1103,6 +1112,23 @@ export class GroupsManager<
         group.idStr,
         nowSeconds(),
       );
+      // Per-relay progress of an earlier page-capped backfill: the walk skips
+      // ranges already fetched, so history beyond the cap is reached over
+      // several connects instead of re-reading the newest pages every time.
+      const resume = new Map<string, BackfillProgress>();
+      for (const relay of relays) {
+        const progress = await readBackfillProgress(
+          this.#ingestStateStore,
+          group.idStr,
+          relay,
+        );
+        if (progress)
+          resume.set(relay, {
+            from: progress.from,
+            to: Math.floor(progress.to - slack),
+          });
+      }
+      const walkStart = nowSeconds();
       const backfill = await fetchPagedBackfill(this.network, relays, filter, {
         since:
           cursor === undefined
@@ -1110,15 +1136,30 @@ export class GroupsManager<
             : Math.max(0, Math.floor(cursor - slack)),
         pageSize,
         maxPages,
+        resume,
       });
       const drained = await admit(backfill.events);
+      // Events the group holds only in memory (undecryptable-so-far pool and
+      // capacity-refused input) are lost on restart, so neither the cursor nor
+      // recorded progress may pass them. The pool is read directly because
+      // ingest pools undecryptable events without yielding a result for them.
+      const held = drained.failed ? [] : group.pendingEvents();
+
+      if (!drained.failed)
+        await this.#recordBackfillProgress(
+          group.idStr,
+          backfill,
+          resume,
+          held,
+          walkStart,
+        );
 
       // Advance the cursor only once the whole backfill window was fetched AND
       // ingested; otherwise the next connect re-reads from the old cursor.
       if (backfill.complete && !drained.failed) {
         const next = nextBackfillCursor({
           ingested: drained.trusted,
-          heldIds: drained.heldIds,
+          held,
           previous: cursor,
           nowSeconds: nowSeconds(),
         });
@@ -1154,6 +1195,44 @@ export class GroupsManager<
     } catch (error) {
       unsubscribe();
       throw error;
+    }
+  }
+
+  /**
+   * Records each relay's resumable paging progress after a backfill has been
+   * ingested: a capped relay stores the range now fetched (`[until, walk
+   * start]`, ended below the oldest event still held in memory), a completed
+   * relay drops its record. Saturated or failed relays keep any earlier
+   * record unchanged. Persistence failures are logged, never thrown.
+   */
+  async #recordBackfillProgress(
+    groupIdHex: string,
+    backfill: PagedBackfillResult,
+    recorded: ReadonlyMap<string, BackfillProgress>,
+    held: readonly NostrEvent[],
+    walkStart: number,
+  ): Promise<void> {
+    for (const outcome of backfill.relays) {
+      const key = backfillProgressKey(groupIdHex, outcome.relay);
+      try {
+        if (outcome.status === "complete") {
+          if (recorded.has(outcome.relay))
+            await this.#ingestStateStore.removeItem(key);
+        } else if (outcome.status === "capped") {
+          const from = outcome.until;
+          const to = Math.min(
+            walkStart,
+            oldestCreatedAt(held, from) ?? walkStart,
+          );
+          if (from <= to)
+            await this.#ingestStateStore.setItem(
+              key,
+              encodeBackfillProgress({ from, to }),
+            );
+        }
+      } catch (err) {
+        log("connect: failed to persist backfill progress: %o", err);
+      }
     }
   }
 

@@ -9,6 +9,7 @@ import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js"
 import {
   BACKFILL_FUTURE_SKEW_SECONDS,
   backfillCursorKey,
+  backfillProgressKey,
   decodeBackfillCursor,
   encodeBackfillCursor,
   fetchPagedBackfill,
@@ -16,7 +17,7 @@ import {
 } from "../group-backfill.js";
 import { GroupsManager } from "../groups-manager.js";
 import type { NostrNetworkInterface } from "../nostr-interface.js";
-import { fakeVerifyEvent } from "../verify.js";
+import { fakeVerifyEvent, type VerifyEventMethod } from "../verify.js";
 
 const RELAY = "wss://relay.test";
 const nowSeconds = () => Math.floor(Date.now() / 1000);
@@ -72,6 +73,7 @@ function fakeEvent(id: number, createdAt: number): NostrEvent {
 function makeManager(
   network: NostrNetworkInterface,
   ingestStateStore = new InMemoryKeyValueStore<Uint8Array>(),
+  verifyEvent: VerifyEventMethod = fakeVerifyEvent,
 ) {
   return new GroupsManager({
     store: new InMemoryKeyValueStore<SerializedClientState>(),
@@ -80,7 +82,7 @@ function makeManager(
     ingestPersistence: { kind: "durable" },
     signer: testAccount(0).signer,
     network,
-    verifyEvent: fakeVerifyEvent,
+    verifyEvent,
   });
 }
 
@@ -93,9 +95,10 @@ async function groupWithHistory(
   network: PagingNetwork,
   count: number,
   newest: number,
+  verifyEvent?: VerifyEventMethod,
 ) {
   const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
-  const manager = makeManager(network, ingestStateStore);
+  const manager = makeManager(network, ingestStateStore, verifyEvent);
   const group = await manager.create("Backfill Group", { relays: [RELAY] });
   for (let i = 0; i < count; i++) {
     await manager.send(group.id, {
@@ -164,6 +167,59 @@ describe("fetchPagedBackfill", () => {
     expect(result.events).toHaveLength(5);
   });
 
+  it("reports a saturated second instead of a complete backfill", async () => {
+    const network = new PagingNetwork();
+    // Second 700 holds more events (4) than one page (2) can return, so
+    // paging by `until` cannot enumerate all of them.
+    const events = [
+      fakeEvent(1, 701),
+      ...[2, 3, 4, 5].map((id) => fakeEvent(id, 700)),
+      fakeEvent(6, 699),
+    ];
+    network.relayEvents.set(RELAY, events);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 2, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([{ relay: RELAY, status: "saturated" }]);
+    // The walk still continues below the saturated second.
+    expect(result.events.map((e) => e.created_at)).toContain(699);
+  });
+
+  it("resumes below a range an earlier capped backfill fetched", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set(
+      RELAY,
+      Array.from({ length: 10 }, (_, i) => fakeEvent(i + 1, 1000 + i)),
+    );
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      {
+        pageSize: 2,
+        maxPages: 3,
+        resume: new Map([[RELAY, { from: 1002, to: 1009 }]]),
+      },
+    );
+
+    // Head page, then straight to the resume point: no re-read of 1003-1007.
+    expect(network.requests.map((r) => r.filter.until)).toEqual([
+      undefined,
+      1002,
+      1001,
+    ]);
+    expect(result.relays).toEqual([
+      { relay: RELAY, status: "capped", until: 1000 },
+    ]);
+  });
+
   it("reports an incomplete backfill when the page cap is hit", async () => {
     const network = new PagingNetwork();
     network.relayEvents.set(
@@ -196,18 +252,29 @@ describe("nextBackfillCursor", () => {
         fakeEvent(1, now - 10),
         fakeEvent(2, now + BACKFILL_FUTURE_SKEW_SECONDS + 1),
       ],
-      heldIds: new Set(),
+      held: [],
       previous: undefined,
       nowSeconds: now,
     });
     expect(next).toBe(now - 10);
   });
 
+  it("holds the cursor at a held event even if it was not in this batch", () => {
+    // e.g. pooled from the live subscription before this reconnect.
+    const next = nextBackfillCursor({
+      ingested: [fakeEvent(1, now - 10)],
+      held: [fakeEvent(2, now - 300)],
+      previous: now - 200,
+      nowSeconds: now,
+    });
+    expect(next).toBe(now - 300);
+  });
+
   it("holds the cursor at the oldest event still held in memory", () => {
     const held = fakeEvent(2, now - 50);
     const next = nextBackfillCursor({
       ingested: [fakeEvent(1, now - 100), held, fakeEvent(3, now - 10)],
-      heldIds: new Set([held.id]),
+      held: [held],
       previous: now - 200,
       nowSeconds: now,
     });
@@ -217,7 +284,7 @@ describe("nextBackfillCursor", () => {
   it("never moves backwards without a held event", () => {
     const next = nextBackfillCursor({
       ingested: [fakeEvent(1, now - 100)],
-      heldIds: new Set(),
+      held: [],
       previous: now - 10,
       nowSeconds: now,
     });
@@ -311,6 +378,29 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     ).toBe(newest);
   });
 
+  it("does not advance the cursor from a forged copy of an admitted event", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const forgeries = new WeakSet<NostrEvent>();
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 3, newest, (e) => !forgeries.has(e));
+    // An open connection keeps every admitted id in the shared dedup cache.
+    const open = await manager.connect(group.id);
+    // A same-id copy with a newer timestamp that fails verification.
+    const forged = { ...groupEvents[2]!, created_at: newest + 120 };
+    forgeries.add(forged);
+    network.events.push(forged);
+
+    (await manager.connect(group.id)).unsubscribe();
+    open.unsubscribe();
+
+    expect(
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      ),
+    ).toBe(newest);
+  });
+
   it("keeps the cursor when the page cap leaves history unfetched", async () => {
     const network = new PagingNetwork([RELAY]);
     const { manager, group, ingestStateStore } = await groupWithHistory(
@@ -328,6 +418,69 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
 
     expect(
       await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+    ).toBeNull();
+  });
+
+  it("holds the cursor at an undecryptable event pooled without a result", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 3, newest);
+    // A ciphertext this group cannot decrypt (another group's message,
+    // re-tagged into this group). Ingest pools it silently, yielding nothing.
+    const other = makeManager(network);
+    const otherGroup = await other.create("Other", { relays: [RELAY] });
+    await other.send(otherGroup.id, {
+      kind: "applicationMessage",
+      payload: new TextEncoder().encode("foreign"),
+    });
+    const foreign = network.events.at(-1)!;
+    foreign.tags = groupEvents[0]!.tags.map((tag) => [...tag]);
+    foreign.created_at = newest - 30;
+
+    (await manager.connect(group.id)).unsubscribe();
+
+    expect(group.pendingEvents().map((e) => e.id)).toContain(foreign.id);
+    expect(
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      ),
+    ).toBe(newest - 30);
+  });
+
+  it("completes a page-capped backfill over successive connects", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 6, newest);
+    const ingestSpy = vi.spyOn(group, "ingest");
+    const options = {
+      backfillPageSize: 2,
+      backfillMaxPages: 3,
+      backfillSlackSeconds: 0,
+    };
+    const cursor = async () =>
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      );
+
+    let connects = 0;
+    while ((await cursor()) === undefined && connects < 6) {
+      (await manager.connect(group.id, options)).unsubscribe();
+      connects++;
+    }
+
+    expect(await cursor()).toBe(newest);
+    expect(connects).toBeGreaterThan(1);
+    const backfilled = new Set(
+      ingestSpy.mock.calls.flatMap((call) =>
+        (call[0] as NostrEvent[]).map((e) => e.id),
+      ),
+    );
+    expect(backfilled).toEqual(new Set(groupEvents.map((e) => e.id)));
+    // A completed relay drops its resumable progress.
+    expect(
+      await ingestStateStore.getItem(backfillProgressKey(group.idStr, RELAY)),
     ).toBeNull();
   });
 });

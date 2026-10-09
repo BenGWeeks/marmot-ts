@@ -201,7 +201,9 @@ client.groups.on("unreadable", (groupId, event) => {
 
 The backlog fetch is paged and bounded. Each relay is read newest-first in pages of `backfillPageSize` events (default 500), walking `until` backwards, so a relay's result cap cannot silently drop older events. After a backfill has been fully fetched and ingested, the client records a per-group cursor: the `created_at` of the newest ingested event. The next `connect()` for that group fetches only from `cursor - backfillSlackSeconds` (default 600 seconds). The first connect of a group has no cursor and pages through its full history.
 
-The cursor is stored in `ingestStateStore`. Pass a durable `ingestStateStore` to `MarmotClient` to keep backfill bounded across restarts; without one, the cursor lasts only for the current process. The cursor is not advanced when a relay hits `backfillMaxPages` (default 50 per relay), when ingest fails, from events dated more than five minutes in the future, or past an event the group is still holding in memory for a later retry.
+The cursor is stored in `ingestStateStore`. Pass a durable `ingestStateStore` to `MarmotClient` to keep backfill bounded across restarts; without one, the cursor lasts only for the current process. The cursor is not advanced when a relay hits `backfillMaxPages` (default 50 per relay), when a single second holds a full page of events (timestamp paging cannot enumerate it), when ingest fails, from events dated more than five minutes in the future, or past an event the group is still holding in memory for a later retry (see `group.pendingEvents()`).
+
+When a relay hits `backfillMaxPages`, the client also records how far that relay was read (one small record per group relay in `ingestStateStore`). The next `connect()` re-reads the newest events down to that range, then jumps below it and continues, so a history longer than the page cap is completed over successive connects. The record is removed once that relay's backfill completes.
 
 ```typescript
 const connection = client.groups.connectAll({
