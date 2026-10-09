@@ -206,17 +206,25 @@ export async function fetchPagedBackfill(
     const resume = options.resume?.get(relay);
     let until: number | undefined;
     let steppedPastBoundary = false;
-    let saturated = false;
+    // Largest single-second boundary page the walk stepped past. Judged
+    // against the cap only when the walk ends: the cap may be confirmed
+    // (lowered) after the boundary was passed, which makes it saturated.
+    let largestSkippedBoundary = 0;
     // Per-request cap this relay has been proven to enforce: a page is only
     // "full" at `pageSize`, or at the length of an earlier page the relay
     // truncated (the next, narrower request still found new events). The
     // largest page seen is not proof — a short history is short too.
     let confirmedCap = options.pageSize;
     let previousLength: number | undefined;
+    const saturated = () => {
+      if (largestSkippedBoundary < confirmedCap) return false;
+      log("relay %s saturated a second (cap %d)", relay, confirmedCap);
+      return true;
+    };
     const done = () =>
       ({
         collected,
-        outcome: saturated
+        outcome: saturated()
           ? { relay, status: "saturated" as const }
           : { relay, status: "complete" as const },
       }) as const;
@@ -254,11 +262,13 @@ export async function fetchPagedBackfill(
       } else {
         // Everything at or after `until` is already collected. A full page
         // from one second means that second may hold more events than one
-        // page can return; they cannot be reached, so flag the relay.
-        if (oldest === newest && events.length >= confirmedCap) {
-          log("relay %s saturated second %d", relay, oldest);
-          saturated = true;
-        }
+        // page can return; they cannot be reached. Whether the page is
+        // "full" is decided at the end, against the final confirmed cap.
+        if (oldest === newest)
+          largestSkippedBoundary = Math.max(
+            largestSkippedBoundary,
+            events.length,
+          );
         // Step past the boundary second once before concluding.
         until = oldest - 1;
         steppedPastBoundary = true;
@@ -277,7 +287,7 @@ export async function fetchPagedBackfill(
     log("relay %s hit the %d-page backfill cap", relay, options.maxPages);
     // A saturated walk is never recorded as resumable progress: resuming
     // would skip past the second it could not enumerate.
-    if (saturated) return done();
+    if (saturated()) return done();
     return {
       collected,
       outcome: { relay, status: "capped" as const, until: Math.max(0, until!) },

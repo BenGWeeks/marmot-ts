@@ -232,6 +232,28 @@ describe("fetchPagedBackfill", () => {
     expect(result.relays).toEqual([{ relay: RELAY, status: "saturated" }]);
   });
 
+  it("rechecks a boundary stepped past before the relay cap was confirmed", async () => {
+    const network = new PagingNetwork();
+    // Second 700 overflows a relay cap (2) below `pageSize` (10). The walk
+    // steps past 700 before 699 proves the cap; 700 must then count as
+    // saturated, not silently complete with two events missing.
+    network.relayEvents.set(RELAY, [
+      ...[1, 2, 3, 4].map((id) => fakeEvent(id, 700)),
+      fakeEvent(5, 699),
+    ]);
+    network.relayCaps.set(RELAY, 2);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 10, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([{ relay: RELAY, status: "saturated" }]);
+  });
+
   it("resumes below a range an earlier capped backfill fetched", async () => {
     const network = new PagingNetwork();
     network.relayEvents.set(
