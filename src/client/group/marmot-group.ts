@@ -58,6 +58,7 @@ import {
 } from "../session/group-session.js";
 import { NostrNetworkInterface, PublishResponse } from "../nostr-interface.js";
 import { NostrWelcomeDelivery } from "../transport/nostr/welcome-delivery.js";
+import { GroupImageService } from "./group-image-service.js";
 import type {
   WelcomeDeliveryOutcome,
   WelcomeRecipient,
@@ -247,8 +248,8 @@ export type MarmotGroupOptions<
   auditContext?: AuditContextOptions;
   /**
    * Convergence policy (branch selection + `maxRewindCommits` rollback horizon).
-   * Set `maxRewindCommits: Infinity` to keep forks of any age eligible for
-   * re-convergence. Defaults to the profile-1 policy.
+   * Keep the finite profile-1 default for production. `Infinity` is an explicit
+   * debugging/forensics choice that can retain unbounded fork evidence.
    */
   convergencePolicy?: ConvergencePolicy;
   /**
@@ -299,6 +300,8 @@ export type MarmotGroupEvents<
   THistory extends BaseGroupHistory | undefined = any,
   TMedia extends BaseGroupMedia | undefined = any,
 > = {
+  /** Reconciled results from ingestion, history recovery, and settlement. */
+  ingestResult: (result: DispositionedIngestResult) => void;
   /** Emitted when the group state is updated */
   stateChanged: (state: ClientState) => void;
   /** Emitted when a new application message is received */
@@ -372,6 +375,13 @@ export class MarmotGroup<
   readonly runtime: GroupRuntime;
   /** Optional media helper for group encrypted attachments. */
   readonly mediaService: GroupMediaService<TMedia>;
+  /** Dedicated canonical group-image source and retrieval service. */
+  readonly image: GroupImageService;
+  readonly #closeController = new AbortController();
+  /** Aborted when this facade is unloaded, terminal or destroyed. */
+  get closedSignal(): AbortSignal {
+    return this.#closeController.signal;
+  }
 
   /**
    * Outbound intents held while convergence is not `Settled` (B5). Each entry
@@ -870,6 +880,7 @@ export class MarmotGroup<
       getRelays: () => this.relays,
       getGroupRef: () => this.idStr,
       getGroupData: () => this.groupData,
+      assertOpen: () => this.session.assertOpen(),
       confirmPublished: (pending) => this.session.confirmPublished(pending),
       publishFailed: (pending) => this.session.publishFailed(pending),
       save: () => this.save(),
@@ -882,6 +893,10 @@ export class MarmotGroup<
       getState: () => this.state,
       getCiphersuite: () => this.ciphersuite,
       getRetainedStates: () => this.session.retainedStates(),
+    });
+    this.image = new GroupImageService({
+      getState: () => this.state,
+      isClosed: () => this.closedSignal.aborted || this.session.destroyed,
     });
   }
 
@@ -918,9 +933,10 @@ export class MarmotGroup<
 
   /** Realizes durable terminal notification exactly once across restarts. */
   async realizeDisbandIfNeeded(): Promise<void> {
+    if (this.closedSignal.aborted) return;
     const tombstone = await this.session.markDisbandNotificationDelivered();
     if (!tombstone) return;
-    this.session.dispose();
+    this.dispose();
     this.#rejectQueuedOutbound(new GroupTerminalError());
     this.#emitDisbandedSafely(tombstone);
   }
@@ -941,7 +957,11 @@ export class MarmotGroup<
   }
 
   #assertNotDisbanded(): void {
+    // Destruction remains the strongest fence; retained terminal facades keep
+    // their typed disband error even after releasing in-memory resources.
+    if (this.session.destroyed) this.session.assertOpen();
     if (this.session.terminalTombstone) throw new GroupTerminalError();
+    this.session.assertOpen();
   }
 
   /**
@@ -973,9 +993,13 @@ export class MarmotGroup<
    * removal.
    */
   async reconverge(): Promise<void> {
+    if (this.session.destroyed) return;
     this.#assertNotDisbanded();
     const results = await this.session.reconverge();
-    for (const result of results) await this.#applyRemovalWithdrawal(result);
+    for (const result of results) {
+      await this.#applyRemovalWithdrawal(result);
+      this.emit("ingestResult", result);
+    }
     // A tree-fed switch can also land us ON a branch that removes us. The
     // realization obligation is state-derived (D-12), so re-assert it here;
     // idempotent, and a no-op unless canonical state is now the tombstone.
@@ -1068,6 +1092,10 @@ export class MarmotGroup<
     intent: GroupSessionSendIntent,
   ): Promise<GroupPublishResult[]> {
     this.#assertNotDisbanded();
+    // Snapshot immutable expected-parent evidence before a convergence wait.
+    intent = { ...intent };
+    const signal = intent.kind === "commit" ? intent.signal : undefined;
+    signal?.throwIfAborted();
     if (mayReleaseOutbound(this.session.convergenceStatus, this.lifecycle)) {
       return this.#sendNow(intent);
     }
@@ -1078,7 +1106,27 @@ export class MarmotGroup<
       this.lifecycle,
     );
     return new Promise<GroupPublishResult[]>((resolve, reject) => {
-      this.#outboundQueue.push({ intent, resolve, reject });
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      const item = {
+        intent,
+        resolve: (results: GroupPublishResult[]) => {
+          cleanup();
+          resolve(results);
+        },
+        reject: (error: unknown) => {
+          cleanup();
+          reject(error);
+        },
+      };
+      const abort = () => {
+        const index = this.#outboundQueue.indexOf(item);
+        if (index < 0) return; // Preparation owns cancellation after dequeue.
+        this.#outboundQueue.splice(index, 1);
+        item.reject(signal!.reason);
+      };
+      this.#outboundQueue.push(item);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
     });
   }
 
@@ -1155,8 +1203,32 @@ export class MarmotGroup<
   async #sendNow(
     intent: GroupSessionSendIntent,
   ): Promise<GroupPublishResult[]> {
-    const effects = await this.session.send(intent);
-    return this.runtime.publishEffects(effects);
+    const signal = intent.kind === "commit" ? intent.signal : undefined;
+    signal?.throwIfAborted();
+    return new Promise<GroupPublishResult[]>((resolve, reject) => {
+      const abort = () => reject(signal!.reason);
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      signal?.addEventListener("abort", abort, { once: true });
+      // Observe late preparation while releasing its caller/FIFO promptly.
+      // Start publication in the same continuation that acquires the effects,
+      // leaving no orphan staged commit between cancellation and runtime handoff.
+      void this.session.send(intent).then(
+        (effects) => {
+          cleanup();
+          if (signal?.aborted) {
+            for (const work of effects.publish)
+              if ("pending" in work) this.session.publishFailed(work.pending);
+            reject(signal.reason);
+            return;
+          }
+          resolve(this.runtime.publishEffects(effects));
+        },
+        (error) => {
+          cleanup();
+          reject(error);
+        },
+      );
+    });
   }
 
   /**
@@ -1203,6 +1275,7 @@ export class MarmotGroup<
     for (const result of resumed) {
       await this.#applyRemovalWithdrawal(result);
       if (result.kind === "removed") await this.#realizeRemovalIfNeeded();
+      this.emit("ingestResult", result);
     }
     await this.realizeDisbandIfNeeded();
     // CR-04: routed through the single resume seam rather than repeating its
@@ -1218,6 +1291,7 @@ export class MarmotGroup<
    * request mid-session, so both resume paths share one predicate.
    */
   async resumePendingDisband(): Promise<void> {
+    if (this.session.destroyed) return;
     // D-12: nothing is published automatically for a group outside the current
     // account identity proof profile. `MarmotGroupEngine.requestDisband` now
     // refuses such a group itself (CR-04), before it persists or prepares
@@ -1373,12 +1447,16 @@ export class MarmotGroup<
         } catch {
           /* rolled back; retried on a later ingest */
         }
+        this.emit("ingestResult", result);
         yield result;
-        if (applied)
-          yield {
+        if (applied) {
+          const reconciled = {
             ...applied,
             disposition: ingestResultDisposition(applied),
           };
+          this.emit("ingestResult", reconciled);
+          yield reconciled;
+        }
         continue;
       }
 
@@ -1416,7 +1494,7 @@ export class MarmotGroup<
         await this.realizeDisbandIfNeeded();
 
       await this.#applyRemovalWithdrawal(result);
-
+      this.emit("ingestResult", result);
       yield result;
     }
 
@@ -1516,6 +1594,8 @@ export class MarmotGroup<
    * timer/promise does not outlive the cached instance.
    */
   dispose() {
+    this.#closeController.abort();
+    this.image.close();
     this.session.dispose();
     this.#rejectQueuedOutbound("Group unloaded; outbound cancelled.");
   }
@@ -1523,6 +1603,8 @@ export class MarmotGroup<
   /** Destroys the group and purges the group history */
   async destroy() {
     this.log("destroying group");
+    this.image.close();
+    this.session.beginDestroy();
 
     // Stop the settle timer and fail queued outbound before tearing down (B5).
     this.dispose();

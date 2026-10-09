@@ -6,6 +6,7 @@ import {
   defaultCryptoProvider,
   defaultProposalTypes,
   getCiphersuiteImpl,
+  getAppDataDictionary,
   joinGroup,
   makeCustomExtension,
   unsafeTestingAuthenticationService,
@@ -21,7 +22,9 @@ import {
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { createChatRumor } from "../../client/group/application-message.js";
 import { createCredential } from "../../core/credential.js";
-import { createSimpleGroup } from "../../core/group.js";
+import { createGroup, createSimpleGroup } from "../../core/group.js";
+import { NostrGroupPeeler } from "../../client/group/nostr-peeler.js";
+import { messageRetentionEntry } from "../../core/components/dictionary.js";
 import {
   createGroupEvent,
   decryptGroupMessages,
@@ -73,10 +76,127 @@ async function createTestGroupState(
     kp,
     ciphersuiteImpl,
     "Test Group",
-    { adminPubkeys: [account.pubkey], relays: [] },
+    { adminPubkeys: [account.pubkey], relays: ["wss://relay.test"] },
   );
   return { clientState, kp };
 }
+
+describe("source-epoch expiration (app-components/message-retention-v1.md)", () => {
+  const u64Max = (1n << 64n) - 1n;
+
+  async function makeEngine(retention?: bigint) {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const { clientState, kp } = await createTestGroupState(account, impl);
+    const { clientState: state } = await createGroup({
+      creatorKeyPackage: kp,
+      ciphersuiteImpl: impl,
+      components: [
+        ...getAppDataDictionary(clientState.groupContext.extensions)!.filter(
+          (entry) => entry.componentId !== 1,
+        ),
+        ...(retention === undefined ? [] : [messageRetentionEntry(retention)]),
+      ],
+    });
+    return {
+      account,
+      engine: new MarmotGroupEngine({
+        state,
+        ciphersuite: impl,
+        peeler: new NostrGroupPeeler(impl),
+      }),
+    };
+  }
+
+  it.each([
+    [100, 60n, "160"],
+    [0, u64Max, u64Max.toString()],
+    [1, u64Max - 1n, u64Max.toString()],
+    [Number.MAX_SAFE_INTEGER, 2n, "9007199254740993"],
+    [1, u64Max, undefined],
+    [100, 0n, undefined],
+    [100, undefined, undefined],
+    [-1, 60n, undefined],
+    [1.5, 60n, undefined],
+    [NaN, 60n, undefined],
+    [Infinity, 60n, undefined],
+    [Number.MAX_SAFE_INTEGER + 1, 60n, undefined],
+  ])(
+    "wraps timestamp %s and retention %s with exact expiry %s",
+    async (created_at, retention, expiry) => {
+      const { engine, account } = await makeEngine(retention);
+      const rumor = createChatRumor({
+        pubkey: account.pubkey,
+        content: "retained",
+        created_at,
+      });
+      const sent = await engine.send({
+        kind: "applicationMessage",
+        payload: serializeApplicationRumor(rumor),
+      });
+      expect(sent.kind).toBe("applicationMessage");
+      expect(
+        sent.envelope.tags.filter((tag) => tag[0] === "expiration"),
+      ).toEqual(expiry === undefined ? [] : [["expiration", expiry]]);
+    },
+  );
+
+  it("omits hints for noncanonical application payloads without failing MLS sends", async () => {
+    const { engine, account } = await makeEngine(60n);
+    const rumor = createChatRumor({
+      pubkey: account.pubkey,
+      content: "retained",
+      created_at: 100,
+    });
+    const payloads = [
+      new TextEncoder().encode("not a rumor"),
+      new TextEncoder().encode(
+        JSON.stringify({ ...rumor, id: "0".repeat(64) }),
+      ),
+      new TextEncoder().encode(JSON.stringify({ ...rumor, sig: "extra" })),
+      new TextEncoder().encode(JSON.stringify({ ...rumor, created_at: "100" })),
+    ];
+    for (const payload of payloads) {
+      const sent = await engine.send({ kind: "applicationMessage", payload });
+      expect(
+        sent.envelope.tags.filter((tag) => tag[0] === "expiration"),
+      ).toEqual([]);
+    }
+  });
+
+  it("omits expiration from proposals, commits and self-updates with enabled retention", async () => {
+    const { engine, account } = await makeEngine(60n);
+    const proposal = await engine.send({
+      kind: "proposal",
+      proposal: {
+        proposalType: defaultProposalTypes.remove,
+        remove: { removed: 0 as import("ts-mls").LeafIndex },
+      },
+    });
+    expect(
+      proposal.envelope.tags.filter((tag) => tag[0] === "expiration"),
+    ).toEqual([]);
+    if (proposal.kind !== "proposal") throw new Error("expected proposal");
+    engine.publishFailed(proposal.pending);
+    const commit = await engine.send({
+      kind: "commit",
+      actorPubkey: account.pubkey,
+      extraProposals: [],
+    });
+    expect(
+      commit.envelope.tags.filter((tag) => tag[0] === "expiration"),
+    ).toEqual([]);
+    if (commit.kind !== "groupEvolution") throw new Error("expected commit");
+    engine.publishFailed(commit.pending);
+    const update = await engine.send({ kind: "selfUpdate" });
+    expect(
+      update.envelope.tags.filter((tag) => tag[0] === "expiration"),
+    ).toEqual([]);
+  });
+});
 
 describe("MarmotGroupEngine lifecycle (group-state.md)", () => {
   it("starts Stable, confirmPublished advances epoch, publishFailed resets to Stable", async () => {

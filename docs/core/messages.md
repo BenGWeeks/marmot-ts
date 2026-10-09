@@ -58,9 +58,15 @@ const event = await createGroupEvent({
 // event is a fully formed Nostr event (including signature)
 ```
 
-::: warning Spec deviation
-When a group's `message-retention.v1` component enables a retention duration, senders SHOULD attach a NIP-40 `expiration` tag to application-message kind 445 events ([`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md), "Message expiration"). `createGroupEvent` never adds this tag. Commits and proposals must never carry one.
-:::
+### Exact application expiration
+
+The client/engine application-send path computes `expiration = innerRumor.created_at + disappearing_message_secs` from the **source epoch's** `message-retention.v1` component, before signing the kind 445 event. It carries this checked value as `bigint` transport metadata and writes the exact decimal NIP-40 `expiration` tag; even values above `Number.MAX_SAFE_INTEGER` remain exact.
+
+The inner timestamp must be a safe, nonnegative integer, and addition must fit unsigned 64-bit seconds. Missing, removed or zero retention, invalid/noncanonical application payloads or timestamps, malformed retention, and overflowing sums omit the hint without failing the MLS send. Commits, proposals and self-updates omit expiration metadata. This tag is an application retention hint, not a reason to discard required MLS state, retained epochs or pending publish obligations. See [`app-components/message-retention-v1.md`](https://github.com/marmot-protocol/marmot/blob/master/app-components/message-retention-v1.md) and [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md), "Message expiration".
+
+`createGroupEvent` and custom peelers cannot infer plaintext expiry from encrypted MLS bytes. Lower-level callers may pass `metadata: { expiration: checkedExpiry }` only for an application message; `checkedExpiry` must be a checked `bigint` in the uint64 range. Without metadata the event has no expiry hint. Custom transport implementations can accept the optional third `wrapGroupMessage(message, state, metadata)` argument; existing two-argument adapters continue to work.
+
+Publication retries reuse the original signed event, including its ID, content, tags and outer `created_at`. A later retention-policy update does not recompute expiry or create another envelope. The outer timestamp remains the original wrap-time timestamp; expiry is derived from the inner rumor timestamp.
 
 ### Ephemeral Signer
 
@@ -201,7 +207,7 @@ console.log(rumor.pubkey); // Sender's pubkey
 The recommended path is the client: [`MarmotGroup`](/client/marmot-group) handles MLS encryption, the group event envelope, convergence-gated sending, and inbound validation (admin policy, identity proofs, commit legality, convergence).
 
 ::: tip Why not raw `processMessage`?
-`createApplicationMessage` / `processMessage` from `@internet-privacy/marmot-ts/mls` apply MLS rules only. They skip Marmot's admin-policy, identity-proof, commit-legality, authorship and convergence checks. The Marmot credential policy (the `authService` they need) is not part of the public API either. Use the client or engine path below.
+`createApplicationMessage` / `processMessage` from `@internet-privacy/marmot-ts/mls` apply MLS rules only. They skip Marmot's admin-policy, identity-proof, commit-legality, authorship and convergence checks. The public [`marmotAuthService`](./credentials#authentication) provides basic-credential identity and curve validation; it does not supply those additional checks. Use the client or engine path below.
 :::
 
 ### Sending a Message

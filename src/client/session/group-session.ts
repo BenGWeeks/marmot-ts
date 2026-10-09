@@ -1,7 +1,13 @@
 /** @module @category Client - Session */
+import { deserializeApplicationData } from "../../core/application-rumor.js";
+import {
+  encodeDeliveredEvidence,
+  decodeDeliveredEvidence,
+} from "./delivered-payload-store.js";
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import {
   getCredentialFromLeafIndex,
+  appDataUpdateProposalType,
   type CiphersuiteImpl,
   type ClientState,
   type LeafIndex,
@@ -9,8 +15,11 @@ import {
 } from "ts-mls";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { getAdminPolicy } from "../../core/components/dictionary.js";
+import { getGroupMemberPubkeys } from "../../core/group-members.js";
 
 import type { GroupProfileSupport } from "../../core/components/account-identity-proof.js";
+import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../../core/components/ids.js";
 import {
   getMarmotGroupView,
   serializeClientState,
@@ -117,6 +126,8 @@ export type DispositionedIngestResult = IngestResult & {
 export interface GroupSessionHistory {
   saveMessage(message: Uint8Array): Promise<void>;
   purgeMessages(): Promise<void>;
+  /** Idempotent durable retraction by canonical inner rumor ID. */
+  removeMessage(rumorId: string): Promise<void>;
 }
 
 export type GroupSessionOptions<
@@ -151,8 +162,8 @@ export type GroupSessionOptions<
   historyTree?: GroupHistoryTree;
   /**
    * Convergence policy (branch selection + `maxRewindCommits` rollback horizon).
-   * Defaults to the profile-1 policy; set `maxRewindCommits: Infinity` to retain
-   * forks of any age for re-convergence.
+   * Keep the finite profile-1 default for production. `Infinity` is an explicit
+   * debugging/forensics choice that can retain unbounded fork evidence.
    */
   convergencePolicy?: ConvergencePolicy;
   /**
@@ -232,8 +243,16 @@ export class GroupSession<
 
   #groupData: MarmotGroupView | null = null;
   #dirty = false;
+  #destroyed = false;
+  #disposed = false;
+  readonly #localWrites = new Set<Promise<unknown>>();
   #terminalTombstone: DisbandTombstone | undefined;
   readonly #terminalHydrated: Promise<void>;
+  readonly #deliveredHydrated: Promise<void>;
+  readonly #pendingRetractions = new Map<
+    string,
+    import("../../engine/delivered-payloads.js").DeliveredAppPayload<NostrEvent>
+  >();
 
   readonly #onStateChanged?: (state: ClientState) => void;
   readonly #onStateSaved?: () => void;
@@ -278,11 +297,36 @@ export class GroupSession<
       now: options.now,
       settlementQuiescenceMs: options.settlementQuiescenceMs,
       scheduler: options.scheduler,
-      onSettleCheck: options.onSettleCheck,
+      onSettleCheck: async () => {
+        await this.#deliveredHydrated;
+        if (this.#destroyed || this.#disposed) return;
+        try {
+          await options.onSettleCheck?.();
+        } catch (error) {
+          if (!this.#destroyed && !this.#disposed) throw error;
+        }
+      },
       audit: options.audit,
       auditContext: options.auditContext,
-      lifecycleStore: this.lifecycleStore,
+      // Engine lifecycle writes also occur outside awaited session calls (for
+      // example when a confirmed epoch refreshes a pending request). Route
+      // every such write through the same destruction barrier.
+      lifecycleStore: this.lifecycleStore && {
+        getItem: (key) => this.lifecycleStore!.getItem(key),
+        keys: () => this.lifecycleStore!.keys(),
+        setItem: async (key, value) => {
+          await this.#write(() => this.lifecycleStore!.setItem(key, value));
+          return value;
+        },
+        removeItem: async (key) => {
+          await this.#write(() => this.lifecycleStore!.removeItem(key));
+        },
+        clear: async () => {
+          await this.#write(() => this.lifecycleStore!.clear());
+        },
+      },
       onStateChanged: (newState) => {
+        if (this.#destroyed || this.#disposed) return;
         this.#dirty = true;
         this.#groupData = null;
         this.#onStateChanged?.(newState);
@@ -295,6 +339,7 @@ export class GroupSession<
     if (this.rewindStore && !options.historyTree)
       this.#engine.history.bindStore(this.rewindStore);
     this.#terminalHydrated = this.#hydrateDisbandTombstone();
+    this.#deliveredHydrated = this.#hydrateDelivered();
   }
 
   get id(): Uint8Array {
@@ -369,23 +414,79 @@ export class GroupSession<
     return this.#dirty;
   }
 
+  /** Refuses stale preparation, publication and confirmation after teardown. */
+  get destroyed(): boolean {
+    return this.#destroyed;
+  }
+
+  assertOpen(): void {
+    if (this.#destroyed) throw new Error("Group destroyed");
+    if (this.#disposed) throw new Error("Group unloaded");
+  }
+
+  /** Serializable identity of the canonical parent, including same-epoch forks. */
+  get parentToken(): string {
+    const { groupContext, confirmationTag } = this.state;
+    return bytesToHex(
+      sha256(
+        new TextEncoder().encode(
+          JSON.stringify([
+            "marmot/group-parent/v1",
+            bytesToHex(groupContext.groupId),
+            groupContext.epoch.toString(),
+            bytesToHex(confirmationTag),
+            bytesToHex(groupContext.treeHash),
+            bytesToHex(groupContext.confirmedTranscriptHash),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /** Track a whole admitted operation, including engine I/O between awaits. */
+  async #whileOpen<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const result = await this.#write(async () => {
+      let value: T;
+      try {
+        value = await operation();
+      } catch (error) {
+        this.assertOpen();
+        throw error;
+      }
+      this.assertOpen();
+      return { value };
+    });
+    this.assertOpen();
+    if (!result) throw new Error("Group destroyed");
+    return result.value;
+  }
+
   async save(force = false): Promise<void> {
     await this.#terminalHydrated;
-    if (this.#terminalTombstone) return;
+    await this.#deliveredHydrated;
+    if (this.#destroyed || this.#disposed || this.#terminalTombstone) return;
     // The history tree can grow without the canonical state changing — a fork
     // whose incoming branch is superseded still records the losing branch — so
     // a dirty tree must trigger a save even when `#dirty` (state-changed) is not.
     const treeDirty = !!this.rewindStore && this.#engine.history.isDirty;
-    if (!force && !this.#dirty && !treeDirty) return;
+    if (!force && !this.#dirty && !treeDirty) {
+      await this.#persistDelivered();
+      return;
+    }
 
     const idHex = bytesToHex(this.id);
     // Persist the full-fork history tree — the single source for fork recovery
     // across restarts. Append-only flush of any new nodes (O(new nodes)). The
     // bounded convergence window is rebuilt from the tree on load.
-    await this.#engine.persistDisbandConvergence();
-    if (this.rewindStore) await this.#engine.history.flush();
+    await this.#write(() => this.#engine.persistDisbandConvergence());
+    if (this.rewindStore) await this.#write(() => this.#engine.history.flush());
+    // Restored delivered evidence must reference durable branch nodes, while
+    // terminal convergence evidence must precede any fallible history write.
+    await this.#persistDelivered();
     const stateBytes = serializeClientState(this.state);
-    await this.store.setItem(idHex, stateBytes);
+    await this.#write(() => this.store.setItem(idHex, stateBytes));
+    if (this.#destroyed || this.#disposed) return;
     this.#dirty = false;
     this.#onStateSaved?.();
   }
@@ -403,6 +504,9 @@ export class GroupSession<
    * (CONV-03, D-12). This layer used to swallow them (CR-06).
    */
   async reconverge(): Promise<DispositionedIngestResult[]> {
+    await this.#deliveredHydrated;
+    if (this.#destroyed) return [];
+    await this.#retryRetractions();
     const results: DispositionedIngestResult[] = [];
     for (const result of await this.#engine.reconvergeFromHistory())
       results.push(...(await this.#reconcile(mapEngineIngestResult(result))));
@@ -412,6 +516,9 @@ export class GroupSession<
 
   /** Runs one retained-input scheduler edge through the normal reconciliation seam. */
   async driveConvergence(): Promise<DispositionedIngestResult[]> {
+    await this.#deliveredHydrated;
+    if (this.#destroyed) return [];
+    await this.#retryRetractions();
     const results: DispositionedIngestResult[] = [];
     for (const result of await this.#engine.driveConvergence())
       results.push(...(await this.#reconcile(mapEngineIngestResult(result))));
@@ -422,12 +529,49 @@ export class GroupSession<
     return results;
   }
 
+  /** Close admission synchronously, before asynchronous media/store cleanup. */
+  beginDestroy(): void {
+    this.#destroyed = true;
+    this.#engine.dispose();
+    this.#engine.destroyDeliveredPayloads();
+    this.#pendingRetractions.clear();
+  }
+
+  /** Track local writes so destruction waits for any already admitted I/O. */
+  async #write<T>(operation: () => Promise<T> | T): Promise<T | undefined> {
+    if (this.#destroyed || this.#disposed) return undefined;
+    const write = Promise.resolve().then(() => {
+      if (!this.#destroyed && !this.#disposed) return operation();
+      return undefined;
+    });
+    this.#localWrites.add(write);
+    try {
+      return await write;
+    } finally {
+      this.#localWrites.delete(write);
+    }
+  }
+
   async destroyLocalState(): Promise<void> {
+    this.beginDestroy();
+    // Hydration may already be reading the plaintext ledger. Let reads finish
+    // before purge, and settle writes admitted before the destruction fence.
+    await Promise.allSettled([this.#terminalHydrated, this.#deliveredHydrated]);
+    await Promise.allSettled([...this.#localWrites]);
+    this.#pendingRetractions.clear();
     await this.history?.purgeMessages();
     const idHex = bytesToHex(this.id);
     await this.#removedMarkerStore?.removeItem(`${idHex}/removed`);
     await this.store.removeItem(idHex);
     if (this.rewindStore) await GroupHistoryTree.purge(this.rewindStore, idHex);
+    if (this.ingestStateStore)
+      for (const key of await this.ingestStateStore.keys())
+        if (key.startsWith(`${idHex}/`))
+          await this.ingestStateStore.removeItem(key);
+    if (this.lifecycleStore && this.lifecycleStore !== this.ingestStateStore)
+      for (const key of await this.lifecycleStore.keys())
+        if (key.startsWith(`${idHex}/`))
+          await this.lifecycleStore.removeItem(key);
   }
 
   /** Returns authoritative terminal evidence, failing closed on corrupt bytes. */
@@ -445,7 +589,15 @@ export class GroupSession<
   async markDisbandNotificationDelivered(): Promise<
     DisbandTombstone | undefined
   > {
+    if (this.#destroyed) return undefined;
+    return this.#whileOpen(() => this.#markDisbandNotificationDelivered());
+  }
+
+  async #markDisbandNotificationDelivered(): Promise<
+    DisbandTombstone | undefined
+  > {
     await this.#terminalHydrated;
+    this.assertOpen();
     const current = this.#terminalTombstone;
     if (!current || current.notificationState === "delivered") return undefined;
     if (!this.lifecycleStore)
@@ -458,14 +610,21 @@ export class GroupSession<
       disbandTombstoneKey(bytesToHex(current.groupId)),
       encodeDisbandTombstone(delivered),
     );
+    this.assertOpen();
     this.#terminalTombstone = delivered;
     return delivered;
   }
 
   /** Waits until both durable lifecycle namespaces have been decoded. */
   async hydrateLifecycleEvidence(): Promise<void> {
-    await this.#terminalHydrated;
-    await this.#engine.disbandRequest();
+    await this.#write(async () => {
+      await this.#terminalHydrated;
+      await this.#deliveredHydrated;
+      if (this.#destroyed) return;
+      await this.#retryRetractions();
+      if (this.#destroyed) return;
+      await this.#engine.disbandRequest();
+    });
   }
 
   /**
@@ -490,7 +649,8 @@ export class GroupSession<
   ): Promise<void> {
     if (!evidence) return;
     await this.#terminalHydrated;
-    if (this.#terminalTombstone || !this.lifecycleStore) return;
+    if (this.#destroyed || this.#terminalTombstone || !this.lifecycleStore)
+      return;
     try {
       await this.persistSelectedDisband(evidence);
     } catch (error) {
@@ -506,7 +666,14 @@ export class GroupSession<
   async persistSelectedDisband(
     evidence: DisbandCandidateEvidence,
   ): Promise<DisbandTombstone> {
+    return this.#whileOpen(() => this.#persistSelectedDisband(evidence));
+  }
+
+  async #persistSelectedDisband(
+    evidence: DisbandCandidateEvidence,
+  ): Promise<DisbandTombstone> {
     await this.#terminalHydrated;
+    this.assertOpen();
     if (this.#terminalTombstone) return this.#terminalTombstone;
     if (!this.lifecycleStore)
       throw new Error("Selected disband requires a lifecycle store");
@@ -525,10 +692,12 @@ export class GroupSession<
       disbandTombstoneKey(idHex),
       encodeDisbandTombstone(tombstone),
     );
+    this.assertOpen();
     await this.lifecycleStore.setItem(
       disbandRegistryStateKey(idHex),
       serializeClientState(scrubTerminalRegistryState(this.state)),
     );
+    this.assertOpen();
     this.#terminalTombstone = tombstone;
     await this.#cleanupAfterDisband(idHex);
     return tombstone;
@@ -538,16 +707,19 @@ export class GroupSession<
     if (!this.lifecycleStore) return;
     const idHex = bytesToHex(this.id);
     const bytes = await this.lifecycleStore.getItem(disbandTombstoneKey(idHex));
-    if (!bytes) return;
+    if (!bytes || this.#destroyed || this.#disposed) return;
     const tombstone = decodeDisbandTombstone(bytes);
     if (bytesToHex(tombstone.groupId) !== idHex)
       throw new Error("Invalid disband tombstone group id");
     this.#terminalTombstone = tombstone;
     if (!(await this.lifecycleStore.getItem(disbandRegistryStateKey(idHex))))
-      await this.lifecycleStore.setItem(
-        disbandRegistryStateKey(idHex),
-        serializeClientState(scrubTerminalRegistryState(this.state)),
+      await this.#write(() =>
+        this.lifecycleStore!.setItem(
+          disbandRegistryStateKey(idHex),
+          serializeClientState(scrubTerminalRegistryState(this.state)),
+        ),
       );
+    if (this.#destroyed || this.#disposed) return;
     await this.#cleanupAfterDisband(idHex);
   }
 
@@ -569,10 +741,12 @@ export class GroupSession<
 
   /** Releases engine resources (the settle-check timer); call on teardown (B5). */
   dispose(): void {
+    this.#disposed = true;
     this.#engine.dispose();
   }
 
   confirmPublished(pending: PendingState): StateNotification[] {
+    this.assertOpen();
     const historySizeBefore = this.#engine.history.size;
     const notifications = this.#engine.confirmPublished(pending);
     if (this.#engine.history.size !== historySizeBefore)
@@ -581,6 +755,7 @@ export class GroupSession<
   }
 
   publishFailed(pending: PendingState): void {
+    if (this.#destroyed || this.#disposed) return;
     this.#engine.publishFailed(pending);
   }
 
@@ -592,12 +767,28 @@ export class GroupSession<
   }
 
   async send(intent: GroupSessionSendIntent): Promise<GroupEffects> {
+    const admitted = { ...intent };
+    const effects = await this.#whileOpen(() => this.#send(admitted));
+    // Abort may arrive between engine staging and returning its effects. Release
+    // staged ownership here; late cancelled preparation must not pin the group.
+    if (admitted.kind === "commit" && admitted.signal?.aborted) {
+      for (const work of effects.publish)
+        if ("pending" in work) this.publishFailed(work.pending);
+      admitted.signal.throwIfAborted();
+    }
+    return effects;
+  }
+
+  async #send(intent: GroupSessionSendIntent): Promise<GroupEffects> {
+    await this.#deliveredHydrated;
+    this.assertOpen();
     switch (intent.kind) {
       case "applicationMessage": {
         const sendResult = await this.#engine.send({
           kind: "applicationMessage",
           payload: intent.payload,
         });
+        this.assertOpen();
         if (sendResult.kind !== "applicationMessage") {
           throw new Error(
             "Expected applicationMessage result from applicationMessage send",
@@ -605,6 +796,8 @@ export class GroupSession<
         }
         this.#sentEventIds.add(sendResult.envelope.id);
         await this.#saveHistory(intent.payload);
+        await this.save(true);
+        this.assertOpen();
         return {
           publish: [
             { kind: "applicationMessage", envelope: sendResult.envelope },
@@ -617,6 +810,7 @@ export class GroupSession<
           kind: "proposal",
           proposal: intent.proposal,
         });
+        this.assertOpen();
         if (sendResult.kind !== "proposal") {
           throw new Error("Expected proposal result from proposal send");
         }
@@ -633,6 +827,7 @@ export class GroupSession<
 
       case "selfUpdate": {
         const sendResult = await this.#engine.send({ kind: "selfUpdate" });
+        this.assertOpen();
         if (sendResult.kind !== "selfUpdate") {
           throw new Error("Expected selfUpdate result from selfUpdate send");
         }
@@ -648,12 +843,65 @@ export class GroupSession<
       }
 
       case "commit": {
-        const sendResult = await this.#engine.send({
-          kind: "commit",
-          actorPubkey: intent.actorPubkey,
-          extraProposals: intent.extraProposals,
-          proposalRefs: intent.proposalRefs,
-        });
+        const expectedParent = intent.expectedParent;
+        const assertPreparation = (proposals: readonly Proposal[]) => {
+          this.assertOpen();
+          intent.signal?.throwIfAborted();
+          if (
+            expectedParent !== undefined &&
+            expectedParent !== this.parentToken
+          )
+            throw new Error(
+              "Group canonical parent changed before preparation",
+            );
+          const changesImage = proposals.some(
+            (proposal) =>
+              proposal.proposalType === appDataUpdateProposalType &&
+              "appDataUpdate" in proposal &&
+              proposal.appDataUpdate.componentId ===
+                GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+          );
+          if (expectedParent === undefined && changesImage)
+            throw new Error(
+              "Group image commits require expectedParent from session.parentToken",
+            );
+          if (changesImage) {
+            if (
+              this.state.groupActiveState.kind === "removedFromGroup" ||
+              !getAdminPolicy(this.state.groupContext.extensions)?.includes(
+                intent.actorPubkey,
+              ) ||
+              !getGroupMemberPubkeys(this.state).includes(intent.actorPubkey)
+            )
+              throw new Error(
+                "Only an active group admin can change the Blossom image",
+              );
+            if (this.profileSupport.kind !== "supported")
+              throw new Error(
+                "Group image mutation requires a supported group profile",
+              );
+            if (this.#terminalTombstone || this.lifecycle !== "Stable")
+              throw new Error(
+                "Group image mutation requires a stable active lifecycle",
+              );
+          }
+        };
+        assertPreparation([]);
+        const sendResult = await this.#engine.send(
+          {
+            kind: "commit",
+            actorPubkey: intent.actorPubkey,
+            extraProposals: intent.extraProposals,
+            proposalRefs: intent.proposalRefs,
+          },
+          assertPreparation,
+        );
+        if (intent.signal?.aborted) {
+          if (sendResult.kind === "groupEvolution")
+            this.publishFailed(sendResult.pending);
+          intent.signal.throwIfAborted();
+        }
+        this.assertOpen();
         if (sendResult.kind !== "groupEvolution") {
           throw new Error("Expected groupEvolution result from commit send");
         }
@@ -666,6 +914,7 @@ export class GroupSession<
               actorPubkey: intent.actorPubkey,
               welcome: sendResult.welcome,
               welcomeRecipients: intent.welcomeRecipients,
+              signal: intent.signal,
             },
           ],
         };
@@ -675,7 +924,12 @@ export class GroupSession<
 
   /** Persists irreversible terminal intent before returning publish work. */
   async requestDisband(): Promise<GroupEffects> {
+    return this.#whileOpen(() => this.#requestDisband());
+  }
+
+  async #requestDisband(): Promise<GroupEffects> {
     const sendResult = await this.#engine.requestDisband();
+    this.assertOpen();
     if (!sendResult) return { publish: [] };
     if (sendResult.kind !== "groupEvolution")
       throw new Error("Expected groupEvolution result from disband request");
@@ -694,12 +948,17 @@ export class GroupSession<
 
   /** Returns the hydrated durable disband request, if one exists. */
   async disbandRequest(): Promise<DisbandRequest | undefined> {
-    return this.#engine.disbandRequest();
+    return this.#whileOpen(() => this.#engine.disbandRequest());
   }
 
   /** Builds the atomic active+required lifecycle enablement commit. */
   async enableGroupDisbanding(): Promise<GroupEffects> {
+    return this.#whileOpen(() => this.#enableGroupDisbanding());
+  }
+
+  async #enableGroupDisbanding(): Promise<GroupEffects> {
     const sendResult = await this.#engine.enableGroupDisbanding();
+    this.assertOpen();
     if (!sendResult) return { publish: [] };
     if (sendResult.kind !== "groupEvolution")
       throw new Error(
@@ -740,9 +999,14 @@ export class GroupSession<
    * @returns Publishable proposal effects (one per owned leaf node).
    */
   async leave(ownPubkey: string): Promise<GroupEffects> {
+    return this.#whileOpen(() => this.#leave(ownPubkey));
+  }
+
+  async #leave(ownPubkey: string): Promise<GroupEffects> {
     const removeProposals = await proposeLeaveGroup(ownPubkey)(
       this.proposalContext(),
     );
+    this.assertOpen();
 
     const publish: GroupPublishWork[] = [];
     for (const proposal of removeProposals) {
@@ -750,6 +1014,7 @@ export class GroupSession<
         kind: "proposal",
         proposal,
       });
+      this.assertOpen();
       if (sendResult.kind !== "proposal") {
         throw new Error("Expected proposal result from leave send");
       }
@@ -767,6 +1032,8 @@ export class GroupSession<
     options?: { maxRetries?: number },
   ): AsyncGenerator<DispositionedIngestResult> {
     await this.#terminalHydrated;
+    await this.#deliveredHydrated;
+    if (this.#destroyed) return;
     if (this.#terminalTombstone) {
       for (const event of events) {
         const skipped: SkippedIngestResult = {
@@ -795,6 +1062,7 @@ export class GroupSession<
       }
       return;
     }
+    await this.#retryRetractions();
     for (const pending of (await this.#effectLedger?.pending()) ?? [])
       yield { ...pending, disposition: ingestResultDisposition(pending) };
     const selfEcho: NostrEvent[] = [];
@@ -802,15 +1070,19 @@ export class GroupSession<
     const stateHash = bytesToHex(sha256(serializeClientState(this.state)));
 
     for (const event of events) {
+      if (this.#destroyed) return;
       if (await this.#wrapperLedger?.get(event.id, stateHash)) continue;
       if (this.#sentEventIds.delete(event.id)) selfEcho.push(event);
       else {
-        await this.#wrapperLedger?.begin(event.id, stateHash);
+        await this.#write(() =>
+          this.#wrapperLedger?.begin(event.id, stateHash),
+        );
         rest.push(event);
       }
     }
 
     for (const event of selfEcho) {
+      if (this.#destroyed) return;
       const peeled = await this.#peeler.peelGroupMessages([event], this.state);
       const message = peeled.read[0]?.message;
       if (message) {
@@ -821,12 +1093,14 @@ export class GroupSession<
           reason: "self-echo",
         };
         const disposition = ingestResultDisposition(skipped);
-        await this.#wrapperLedger?.record(event.id, "stale");
+        await this.#write(() => this.#wrapperLedger?.record(event.id, "stale"));
+        if (this.#destroyed) return;
         yield { ...skipped, disposition };
       }
     }
 
     for await (const result of this.#engine.ingest(rest, options)) {
+      if (this.#destroyed) return;
       const mapped = mapEngineIngestResult(result);
 
       if (mapped.kind === "processed")
@@ -838,7 +1112,9 @@ export class GroupSession<
       ) {
         await this.#saveHistory(mapped.result.message);
       }
+      if (this.#destroyed) return;
 
+      const reconciledResults = await this.#reconcile(mapped);
       const retryableUnreadable =
         mapped.kind === "unreadable" && mapped.decryptFailure === true;
       const terminal =
@@ -852,23 +1128,28 @@ export class GroupSession<
             : mapped.disposition.kind === "invalidated"
               ? "invalidated"
               : "stale";
-        await this.#wrapperLedger?.stageApplied(
-          mapped.event.id,
-          stateHash,
-          bytesToHex(sha256(serializeClientState(this.state))),
-          outcome,
+        await this.#write(() =>
+          this.#wrapperLedger?.stageApplied(
+            mapped.event.id,
+            stateHash,
+            bytesToHex(sha256(serializeClientState(this.state))),
+            outcome,
+          ),
         );
         // Canonical state and fork material must be durable before terminal
         // wrapper evidence can suppress replay after a crash.
         await this.save(true);
-        await this.#wrapperLedger?.record(mapped.event.id, outcome);
+        await this.#write(() =>
+          this.#wrapperLedger?.record(mapped.event.id, outcome),
+        );
       }
+      if (this.#destroyed) return;
       if (
         mapped.kind === "processed" &&
         mapped.result.kind === "applicationMessage"
       )
         this.#onApplicationMessage?.(mapped.result.message);
-      for (const reconciled of await this.#reconcile(mapped)) yield reconciled;
+      for (const reconciled of reconciledResults) yield reconciled;
     }
 
     // WR-01: a pool-replay rewind can select disband evidence with no
@@ -884,12 +1165,41 @@ export class GroupSession<
   async #reconcile(
     result: DispositionedIngestResult,
   ): Promise<DispositionedIngestResult[]> {
+    if (this.#destroyed) return [];
+    if (result.kind === "invalidated") {
+      try {
+        if (!result.payload || result.epoch === undefined || !result.tag)
+          throw new Error("Invalidation lacks delivered payload evidence");
+        const rumorId = deserializeApplicationData(
+          result.payload,
+        ).id.toLowerCase();
+        if (result.rumorId !== undefined && result.rumorId !== rumorId)
+          throw new Error("Invalidation rumor identity mismatch");
+        const entry = {
+          epoch: result.epoch,
+          stateTag: result.tag,
+          envelope: result.event,
+          message: result.message,
+          payload: result.payload,
+          rumorId,
+          transportId: result.event.id,
+          commitDigest: result.commitDigest,
+        };
+        this.#pendingRetractions.set(result.event.id, entry);
+        await this.#persistDelivered();
+        await this.#retryRetractions();
+      } catch (error) {
+        this.#onHistoryError?.(error as Error);
+      }
+    }
     if (!this.#effectLedger) return [result];
     if (result.kind === "stateInvalidated") {
-      return (await this.#effectLedger.prepareWithdrawal(
-        result.commitDigest,
-        result.forkEpoch,
-        result.withdrawn,
+      return (await this.#write(() =>
+        this.#effectLedger!.prepareWithdrawal(
+          result.commitDigest,
+          result.forkEpoch,
+          result.withdrawn,
+        ),
       ))
         ? [result]
         : [];
@@ -908,7 +1218,11 @@ export class GroupSession<
     const output: DispositionedIngestResult[] = [result];
     for (const group of groups.values()) {
       const digest = group[0]!.commitDigest;
-      if (await this.#effectLedger.prepareAdoption(digest, group))
+      if (
+        await this.#write(() =>
+          this.#effectLedger!.prepareAdoption(digest, group),
+        )
+      )
         output.push({
           kind: "stateRevalidated",
           commitDigest: digest,
@@ -927,16 +1241,87 @@ export class GroupSession<
       { kind: "stateInvalidated" | "stateRevalidated" }
     >,
   ): Promise<void> {
-    await this.#effectLedger?.acknowledge(
-      result.commitDigest,
-      result.kind === "stateInvalidated" ? "withdrawal" : "adoption",
+    await this.#write(() =>
+      this.#effectLedger?.acknowledge(
+        result.commitDigest,
+        result.kind === "stateInvalidated" ? "withdrawal" : "adoption",
+      ),
     );
   }
 
+  #deliveredKey(): string {
+    return `${bytesToHex(this.id)}/delivered-payloads/v1`;
+  }
+
+  async #hydrateDelivered(): Promise<void> {
+    // Without persisted fork nodes there is no restart rewind authority to
+    // validate historical branch provenance against. Keep session-only evidence.
+    if (!this.rewindStore) return;
+    const bytes = await this.ingestStateStore?.getItem(this.#deliveredKey());
+    if (this.#destroyed || this.#disposed) return;
+    if (!bytes) return; // Older clients have no attributable pre-migration deliveries.
+    const evidence = decodeDeliveredEvidence(bytes, this.#engine.history);
+    this.#engine.importDeliveredPayloads(evidence.entries);
+    for (const entry of evidence.pending)
+      this.#pendingRetractions.set(entry.transportId!, entry);
+  }
+
+  async #retryRetractions(): Promise<void> {
+    if (this.#destroyed) return;
+    for (const [id, entry] of this.#pendingRetractions) {
+      try {
+        // Transport deliveries can share one inner rumor. A losing envelope
+        // withdraws only its own support; retain (or restore) the history row
+        // while any surviving delivery still supports that canonical identity.
+        const surviving = this.#engine
+          .exportDeliveredPayloads()
+          .find((delivery) => delivery.rumorId === entry.rumorId);
+        if (surviving)
+          await this.#write(() => this.history?.saveMessage(surviving.payload));
+        else
+          await this.#write(() => this.history?.removeMessage(entry.rumorId!));
+        if (this.#destroyed) return;
+        this.#pendingRetractions.delete(id);
+        try {
+          await this.#persistDelivered();
+        } catch (error) {
+          if (!this.#destroyed) this.#pendingRetractions.set(id, entry);
+          throw error;
+        }
+        this.#onHistoryChanged?.();
+      } catch (error) {
+        this.#onHistoryError?.(error as Error);
+      }
+    }
+  }
+
+  async #persistDelivered(): Promise<void> {
+    if (this.#destroyed) return;
+    // Rewinds remove the entire batch before yielding individual results. Move
+    // every obligation to the durable outbox before any canonical state save
+    // or history removal can discard the abandoned delivery evidence.
+    const invalidated = this.#engine.exportInvalidatedPayloads();
+    for (const entry of invalidated)
+      if (entry.rumorId && entry.transportId)
+        this.#pendingRetractions.set(entry.transportId, entry);
+    await this.#write(() =>
+      this.ingestStateStore?.setItem(
+        this.#deliveredKey(),
+        encodeDeliveredEvidence({
+          entries: this.#engine
+            .exportDeliveredPayloads()
+            .filter((entry) => !!entry.rumorId),
+          pending: [...this.#pendingRetractions.values()],
+        }),
+      ),
+    );
+    this.#engine.acknowledgeInvalidatedPayloads(invalidated);
+  }
+
   async #saveHistory(message: Uint8Array): Promise<void> {
-    if (!this.history) return;
+    if (!this.history || this.#destroyed) return;
     try {
-      await this.history.saveMessage(message);
+      await this.#write(() => this.history!.saveMessage(message));
     } catch (err) {
       this.#onHistoryError?.(err as Error);
     }

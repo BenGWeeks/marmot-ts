@@ -65,7 +65,7 @@ describe("End-to-end: invite, join, first message", () => {
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
     });
   });
 

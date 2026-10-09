@@ -66,7 +66,7 @@ Every Marmot KeyPackage must ([`foundation/key-packages.md`](https://github.com/
 `generateKeyPackage()` enforces the credential type and lifetime cap (an explicit `lifetime` over the cap throws), adds the `0x8009` proof, and merges the required capabilities (via `ensureMarmotCapabilities`). By default it also:
 
 - sets an 84-day lifetime (with `notBefore` backdated 1 h for clock skew)
-- marks the package last-resort (`isLastResort` defaults to `true`; see the deviation note under [Default Extensions](#default-extensions))
+- marks the package last-resort (`isLastResort` defaults to `true`; see [Default Extensions](#default-extensions))
 - advertises the agent-text-stream `receive` role (`0xf2d1`)
 
 The ciphersuite is whatever `ciphersuiteImpl` you pass; `0x0001` (`MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`) is the mandatory-to-implement default ([`foundation/mls-protocol.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/mls-protocol.md)).
@@ -89,12 +89,16 @@ const ref = await calculateKeyPackageRef(keyPackage.publicPackage);
 import { keyPackageDefaultExtensions } from "@internet-privacy/marmot-ts";
 
 const extensions = keyPackageDefaultExtensions();
-// Returns: [{ extensionType: 0x000a, extensionData: ... }]
-// The legacy MLS last_resort extension (empty data)
+// Returns an app_data_dictionary extension (0x0006) with the canonical
+// empty-data last_resort_key_package component (0x0004).
 ```
 
-::: warning Spec deviation
-The spec marks a last-resort KeyPackage with the empty-data `last_resort_key_package` component (`0x0004`) in its KeyPackage `app_data_dictionary` ([`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md), [`foundation/registries.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/registries.md)). marmot-ts currently emits the legacy MLS `last_resort` extension (`0x000a`) instead, and advertises `0x000a` in capabilities and the `mls_extensions` tag.
+Reusable packages carry the empty-data `last_resort_key_package` component (`0x0004`) in their KeyPackage dictionary, separate from the LeafNode dictionary. Legacy-only `0x000a` markers are rejected; republish those packages with the current format.
+
+Admission and publication reject duplicate dictionaries, duplicate or malformed reuse entries, nonempty marker data, and markers in the LeafNode dictionary. A valid package without the marker is single-use. Last-resort status is not an MLS extension capability; generation removes the obsolete marker advertisement while preserving unrelated capabilities.
+
+::: warning Compatibility migration
+Rejecting legacy-only reusable markers is a deliberate difference from MDK's compatibility fallback. Generate a fresh package with the canonical KeyPackage component and publish it; adding a transport tag cannot repair signed MLS bytes. See [`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md).
 :::
 
 ## Capabilities
@@ -114,7 +118,7 @@ const caps = defaultCapabilities();
 const updated = ensureMarmotCapabilities(myCapabilities);
 ```
 
-`defaultCapabilities()` advertises ciphersuite `0x0001` (plus GREASE values), `basic` credentials only, the extensions `0x0006` (`app_data_dictionary`), `0x000a` (legacy `last_resort`) and `0xf2d1` (agent-text-stream `receive` role), and the proposals `0x0008` (`app_data_update`) and `0x000a` (`self_remove`). `ensureMarmotCapabilities()` adds the same extensions and proposals without filtering ciphersuites or credential types.
+`defaultCapabilities()` advertises ciphersuite `0x0001` (plus GREASE values), `basic` credentials only, the extensions `0x0006` (`app_data_dictionary`) and `0xf2d1` (agent-text-stream `receive` role), and the proposals `0x0008` (`app_data_update`) and `0x000a` (`self_remove`). `ensureMarmotCapabilities()` adds the same extensions and proposals, removes the legacy reuse extension, and preserves ciphersuites and credential types.
 
 ## Lifecycle
 
@@ -122,16 +126,14 @@ const updated = ensureMarmotCapabilities(myCapabilities);
 2. **Publish:** Kind 30443 event in a stable random `d` slot, to your NIP-65 write relays
 3. **Store:** Keep the private package locally
 4. **Consume:** An admin adds you; you process the Welcome with the private package (see [Welcome Messages](./welcome))
-5. **Replace:** After a _successful_ Welcome, publish a fresh KeyPackage in the **same** `d` slot (`client.keyPackages.rotate(ref)`), which then deletes the old private material
+5. **Retire and replace:** `client.joinGroupFromWelcome()` removes a single-use package's private material after durable group adoption, retaining its public metadata and `used` flag. Reusable private material remains available for further joins. Publish a fresh package in the **same** `d` slot with `client.keyPackages.rotate(ref)`; confirmed replacement retires the old record.
    - a non-last-resort `init_key` MUST be deleted after the successful Welcome
-   - a last-resort `init_key` MUST be deleted at the earlier of confirmed replacement or `Lifetime.not_after`
+   - a last-resort `init_key` MUST be deleted at the earlier of confirmed replacement or `Lifetime.not_after`; manage replacement and expiry promptly
 6. **On failure:** if Welcome processing fails, do NOT rotate or delete; the inviter may retry
 
 After joining, also call `group.selfUpdate()` promptly to refresh your leaf key material ([`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)). The library does not do this automatically.
 
-::: warning Spec deviation
-[`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md) requires deleting a consumed KeyPackage's private material (above). `client.joinGroupFromWelcome` only marks the consumed package as used; your app must call `client.keyPackages.rotate(ref)` (or `remove` / `purge`) itself, for example for each entry in `(await client.keyPackages.list()).filter((p) => p.used)`.
-:::
+The client records a consumption receipt before saving the validated group. Cleanup confirms durable adoption, persists private-material retirement, then clears the completed receipt. Startup and `await client.keyPackages.finalizeConsumptions()` retry unfinished cleanup. Durability depends on the supplied stores: separate group and KeyPackage stores are not atomic, so a crash can delay retirement. A receipt without an adopted group never deletes keys. See [Welcome admission and cleanup](./welcome#joining-from-welcome).
 
 ## Security Considerations
 
@@ -225,9 +227,15 @@ await client.keyPackages.create({
 });
 ```
 
-::: warning Spec deviation
-The kind 30443 tag set in [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md) has no `relays` tag ("KeyPackage events do not repeat those relays"). `createKeyPackageEvent` emits one whenever `relays` is passed, and `client.keyPackages.create` / `rotate` always pass it (`rotate` reads it back to pick relays).
-:::
+Kind 30443 events omit relay tags. `create()` retains normalized destinations in local `publicationRelays` metadata; restart rotation reuses them unless explicit routes are supplied. `track(event, relays)` can retain locally known observation routes, and purge publishes to their union. Older records without route metadata need explicit rotation routes or routes recorded through `track` before relay cleanup.
+
+Rotation with no usable local or explicit routes throws `KeyPackageRotatePreconditionError` before creating or deleting anything. Purge throws `MissingRelayError` if a published record has no routes and preserves all records, including retired single-use records, for later cleanup. Routes are never recovered from signed `relays` tags. The deprecated `createKeyPackageEvent({ relays })` option is ignored; send the event to the intended relays through the transport.
+
+### Publication slot migration
+
+`clientId`, `identifier`, stored/tracked `d` values, and `rotate(ref, { d })` must be exactly 64 lowercase hex characters. Empty strings, device labels, uppercase, whitespace, nonhex characters, and other lengths reject before generation, signing, storage, or publication at the corresponding write boundary. Omit the override to use a configured/stored slot; do not pass an empty string.
+
+Generate and persist the random slot shown above once per installation, then configure `MarmotClient` with `clientId: slotId` or pass `identifier: slotId` per publication. For an older device-label slot, publish a fresh package with `create({ identifier: slotId, relays: myWriteRelays })`, then purge the old record using its locally retained routes. If the old record has no routes, use `createDeleteKeyPackageEvent({ events: oldPublishedEvents })`, sign it with the account signer and publish it to your known write relays before removing the old local record. A new `d` creates a new address and does not supersede the device-label publication. `rotate(ref, { d: slotId, relays: myWriteRelays })` is also supported, but removes old local publication records after success, so save the old events/routes first if relay deletion is needed. Do not derive the new slot from your account key or regenerate it on every replacement. See [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md).
 
 ## Related
 

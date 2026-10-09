@@ -46,7 +46,7 @@ describe("invites.listen + keyPackages.ensurePublished", () => {
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
     });
   });
 

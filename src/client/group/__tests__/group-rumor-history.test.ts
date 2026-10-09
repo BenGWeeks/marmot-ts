@@ -1,5 +1,5 @@
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   GroupRumorHistory,
@@ -67,6 +67,11 @@ function makeInMemoryBackend(): GroupRumorHistoryBackend & {
       store.push(rumor);
     },
 
+    async removeRumor(id) {
+      const index = store.findIndex((r) => r.id === id);
+      if (index >= 0) store.splice(index, 1);
+    },
+
     async clear() {
       store.length = 0;
     },
@@ -90,6 +95,63 @@ async function nextValue<T>(
 // ---------------------------------------------------------------------------
 
 describe("GroupRumorHistory.subscribe", () => {
+  it("requeries when insertion races the initial snapshot", async () => {
+    const backend = makeInMemoryBackend();
+    let release!: (rumors: Rumor[]) => void;
+    const initial = new Promise<Rumor[]>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(backend, "queryRumors").mockImplementationOnce(() => initial);
+    const history = new GroupRumorHistory(backend);
+    const gen = history.subscribe();
+    const next = nextValue(gen);
+    const rumor = makeRumor({ id: nextId() });
+    await history.saveRumor(rumor);
+    release([]);
+    expect(await next).toEqual([rumor]);
+    await gen.return(undefined);
+  });
+
+  it("requeries removals and clears racing a pending snapshot without stale rows", async () => {
+    const backend = makeInMemoryBackend();
+    const history = new GroupRumorHistory(backend);
+    const gen = history.subscribe();
+    await nextValue(gen);
+    let release!: (rumors: Rumor[]) => void;
+    vi.spyOn(backend, "queryRumors").mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const next = nextValue(gen);
+    const rumor = makeRumor({ id: nextId() });
+    await history.saveRumor(rumor);
+    await history.removeMessage(rumor.id);
+    await history.purgeMessages();
+    release([rumor]);
+    expect(await next).toEqual([]);
+    await gen.return(undefined);
+    expect(history.listenerCount("removed")).toBe(0);
+  });
+
+  it("keeps backend storage errors observable for save and removal", async () => {
+    const backend = makeInMemoryBackend();
+    const history = new GroupRumorHistory(backend);
+    const error = new Error("backend offline");
+    vi.spyOn(backend, "removeRumor").mockRejectedValue(error);
+    await expect(history.removeMessage(nextId())).rejects.toBe(error);
+    expect(history.listenerCount("removed")).toBe(0);
+  });
+  it("retains changes while consumption is paused and refreshes a full snapshot", async () => {
+    const history = new GroupRumorHistory(makeInMemoryBackend());
+    const gen = history.subscribe();
+    await nextValue(gen);
+    const rumor = makeRumor({ id: nextId() });
+    await history.saveRumor(rumor);
+    expect(await nextValue(gen)).toEqual([rumor]);
+    await gen.return(undefined);
+  });
   it("yields an empty array immediately when the store is empty", async () => {
     const history = new GroupRumorHistory(makeInMemoryBackend());
     const gen = history.subscribe();

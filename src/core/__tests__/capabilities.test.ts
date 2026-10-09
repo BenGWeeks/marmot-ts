@@ -17,6 +17,9 @@ import {
   LAST_RESORT_EXTENSION_TYPE,
   marmotRequiredCapabilitiesExtension,
 } from "../index.js";
+import { getAppComponents } from "../components/dictionary.js";
+import { makeLeafAppComponentsExtension } from "../components/index.js";
+import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../components/ids.js";
 
 // The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
 // whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
@@ -24,7 +27,13 @@ import {
 const LEGACY_ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE = 0xf2f1;
 
 describe("ensureMarmotCapabilities", () => {
-  it("should advertise the app_data_dictionary extension and last_resort", () => {
+  it("advertises the implemented strict image component in default leaf support", () => {
+    const extension = makeLeafAppComponentsExtension(new Uint8Array(104));
+    expect(getAppComponents([extension])).toContain(
+      GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+    );
+  });
+  it("should advertise app_data_dictionary without legacy last_resort", () => {
     const capabilities: Capabilities = {
       versions: [protocolVersions.mls10],
       ciphersuites: [ciphersuites.MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519],
@@ -36,7 +45,7 @@ describe("ensureMarmotCapabilities", () => {
     const result = ensureMarmotCapabilities(capabilities);
 
     expect(result.extensions).toContain(appDataDictionaryExtensionType);
-    expect(result.extensions).toContain(LAST_RESORT_EXTENSION_TYPE);
+    expect(result.extensions).not.toContain(LAST_RESORT_EXTENSION_TYPE);
     expect(result.extensions).toContain(1);
     expect(result.extensions).toContain(2);
     expect(result.extensions).toContain(3);
@@ -134,7 +143,6 @@ describe("ensureMarmotCapabilities", () => {
 
     expect(result.extensions).toEqual([
       appDataDictionaryExtensionType,
-      LAST_RESORT_EXTENSION_TYPE,
       AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE,
     ]);
     expect(result.extensions).not.toContain(

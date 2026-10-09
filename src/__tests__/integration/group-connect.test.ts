@@ -8,24 +8,346 @@ import {
   CiphersuiteImpl,
   defaultCryptoProvider,
   getCiphersuiteImpl,
+  createCommit,
+  createApplicationMessage,
+  encode,
+  mlsMessageEncoder,
+  unsafeTestingAuthenticationService,
 } from "ts-mls";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { GroupsManager } from "../../client/groups-manager.js";
+import {
+  getNostrGroupIdHex,
+  serializeClientState,
+  deserializeClientState,
+} from "../../core/client-state.js";
+import type { NostrEvent } from "applesauce-core/helpers";
+import type { Observer } from "../../client/nostr-interface.js";
+import type { DispositionedIngestResult } from "../../client/session/group-session.js";
 
 import { createApplicationMessageIntent } from "../../client/group/application-message.js";
 import { MarmotClient } from "../../client/marmot-client.js";
 import type { StoredKeyPackage } from "../../client/key-package-manager.js";
-import type { MarmotGroup } from "../../client/group/marmot-group.js";
+import { MarmotGroup } from "../../client/group/marmot-group.js";
 import { SerializedClientState } from "../../core/client-state.js";
 import { deserializeApplicationData } from "../../core/group-message.js";
+import {
+  createGroupEvent,
+  serializeApplicationRumor,
+} from "../../core/group-message.js";
+import { commitDigest } from "../../core/convergence.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import { GroupRumorHistory } from "../../client/group/group-rumor-history.js";
+import { KeyValueRumorHistoryBackend } from "../../extra/key-value-rumor-history-backend.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../../core/protocol.js";
 import { unixNow } from "../../utils/nostr.js";
+import type { GenericKeyValueStore } from "../../utils/key-value.js";
 import { MockNetwork } from "../helpers/mock-network.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store";
 
 const RELAYS = ["wss://mock-relay.test"];
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe("connection admission", () => {
+  async function setup(withPeer = false) {
+    const network = new MockNetwork(RELAYS);
+    const observers: Partial<Observer<NostrEvent>>[] = [];
+    const unsubscribes = vi.fn();
+    vi.spyOn(network, "request").mockResolvedValue([]);
+    const subscribed = deferred();
+    vi.spyOn(network, "subscription").mockImplementation(() => ({
+      subscribe(observer) {
+        observers.push(observer);
+        subscribed.resolve();
+        return { unsubscribe: unsubscribes };
+      },
+    }));
+    const manager = new GroupsManager({
+      store: new InMemoryKeyValueStore<SerializedClientState>(),
+      signer: PrivateKeyAccount.generateNew().signer,
+      network,
+      verifyEvent: () => true,
+    });
+    const group = await manager.create("queued", { relays: RELAYS });
+    let peerGroup: MarmotGroup | undefined;
+    if (withPeer) {
+      const account = PrivateKeyAccount.generateNew();
+      const peer = new MarmotClient({
+        groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+        keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+        signer: account.signer,
+        network,
+        clientId: "ab".repeat(32),
+      });
+      await peer.keyPackages.create({ relays: RELAYS });
+      await manager.invite(
+        group.id,
+        network.events.find(
+          (item) => item.kind === ADDRESSABLE_KEY_PACKAGE_KIND,
+        )!,
+      );
+      const welcomeRumor = await unlockGiftWrap(
+        network.events.find((item) => item.kind === 1059)!,
+        account.signer,
+      );
+      peerGroup = (await peer.joinGroupFromWelcome({ welcomeRumor })).group;
+    }
+    const event = (id: string): NostrEvent => ({
+      id,
+      pubkey: "00".repeat(32),
+      sig: "00".repeat(64),
+      kind: 445,
+      created_at: 1,
+      content: "",
+      tags: [["h", getNostrGroupIdHex(group.state)]],
+    });
+    return {
+      manager,
+      group,
+      network,
+      observers,
+      unsubscribes,
+      subscribed,
+      event,
+      peerGroup,
+    };
+  }
+
+  it("fully drains admitted generators across handles while other groups proceed", async () => {
+    const { manager, group, observers, event } = await setup();
+    const other = await manager.create("independent", { relays: RELAYS });
+    const first = await manager.connect(group.id);
+    const second = await manager.connect(group.id);
+    const third = await manager.connect(other.id);
+    const yielded = deferred();
+    const release = deferred();
+    const finished = deferred();
+    const independent = deferred();
+    const starts: string[] = [];
+    vi.spyOn(group, "ingest").mockImplementation(async function* (events) {
+      starts.push(events[0]!.id);
+      if (events[0]!.id === "first") {
+        yield {
+          kind: "unreadable",
+          event: events[0],
+          disposition: { kind: "stale" },
+        } as DispositionedIngestResult;
+        yielded.resolve();
+        await release.promise;
+        starts.push("first-drained");
+      } else finished.resolve();
+    });
+    vi.spyOn(other, "ingest").mockImplementation(async function* () {
+      independent.resolve();
+    });
+    observers[0]!.next!(event("first"));
+    await yielded.promise;
+    observers[1]!.next!(event("second"));
+    observers[2]!.next!({
+      ...event("other"),
+      tags: [["h", getNostrGroupIdHex(other.state)]],
+    });
+    await independent.promise;
+    expect(starts).toEqual(["first"]);
+    first.unsubscribe();
+    observers[0]!.next!(event("late"));
+    release.resolve();
+    await finished.promise;
+    expect(starts).toEqual(["first", "first-drained", "second"]);
+    second.unsubscribe();
+    third.unsubscribe();
+  });
+
+  it("cancels pending connectAll backfill before admission and subscription", async () => {
+    const { manager, group, network, event } = await setup();
+    const request = deferred<NostrEvent[]>();
+    vi.spyOn(network, "request").mockReturnValue(request.promise);
+    const ingest = vi.spyOn(group, "ingest");
+    const listeners = group.listenerCount("disbanded");
+    const handle = manager.connectAll();
+    handle.unsubscribe();
+    request.resolve([event("backfill")]);
+    // Fence the backfill continuation without waiting on a timer.
+    await request.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ingest).not.toHaveBeenCalled();
+    expect(network.subscription).not.toHaveBeenCalled();
+    expect(group.listenerCount("disbanded")).toBe(listeners);
+    expect(group.listenerCount("ingestResult")).toBe(0);
+  });
+
+  it("recovers a failed batch and deduplicates trusted ids across handles", async () => {
+    const { manager, group, observers, event } = await setup();
+    const handles = [
+      await manager.connect(group.id),
+      await manager.connect(group.id),
+    ];
+    const failed = deferred();
+    const finished = deferred();
+    const starts: string[] = [];
+    vi.spyOn(group, "ingest").mockImplementation(async function* (events) {
+      starts.push(events[0]!.id);
+      if (events[0]!.id === "failed") {
+        failed.resolve();
+        throw new Error("batch failure");
+      }
+      finished.resolve();
+    });
+    observers[0]!.next!(event("failed"));
+    await failed.promise;
+    observers[0]!.next!(event("same"));
+    observers[1]!.next!(event("same"));
+    await finished.promise;
+    // A fresh backfill is an explicit fence behind both admitted callbacks.
+    const fence = await manager.connect(group.id);
+    expect(starts).toEqual(["failed", "same"]);
+    handles.forEach((handle) => handle.unsubscribe());
+    fence.unsubscribe();
+  });
+
+  it("drains queued work after disconnect and rejects later callbacks", async () => {
+    const { manager, group, observers, event } = await setup();
+    const handle = await manager.connect(group.id);
+    const entered = deferred();
+    const release = deferred();
+    const done = deferred();
+    const starts: string[] = [];
+    vi.spyOn(group, "ingest").mockImplementation(async function* (events) {
+      starts.push(events[0]!.id);
+      if (events[0]!.id === "one") {
+        entered.resolve();
+        await release.promise;
+        starts.push("drained");
+      } else done.resolve();
+    });
+    observers[0]!.next!(event("one"));
+    await entered.promise;
+    observers[0]!.next!(event("two"));
+    handle.unsubscribe();
+    observers[0]!.next!(event("three"));
+    expect(group.listenerCount("ingestResult")).toBe(1);
+    release.resolve();
+    await done.promise;
+    const fence = await manager.connect(group.id);
+    fence.unsubscribe();
+    expect(starts).toEqual(["one", "drained", "two"]);
+    expect(group.listenerCount("ingestResult")).toBe(0);
+  });
+
+  it("cancels direct connect backfill through AbortSignal", async () => {
+    const { manager, group, network, event } = await setup();
+    const requested = deferred();
+    const request = deferred<NostrEvent[]>();
+    vi.spyOn(network, "request").mockImplementation(() => {
+      requested.resolve();
+      return request.promise;
+    });
+    const ingest = vi.spyOn(group, "ingest");
+    const controller = new AbortController();
+    const connecting = manager.connect(group.id, { signal: controller.signal });
+    await requested.promise;
+    controller.abort();
+    request.resolve([event("late")]);
+    (await connecting).unsubscribe();
+    expect(ingest).not.toHaveBeenCalled();
+    expect(network.subscription).not.toHaveBeenCalled();
+    expect(group.listenerCount("ingestResult")).toBe(0);
+  });
+
+  it.each(["connect", "connectAll"] as const)(
+    "%s forwards live and settle-timer invalidations exactly once",
+    async (mode) => {
+      const {
+        manager,
+        group,
+        peerGroup,
+        network,
+        observers,
+        subscribed,
+        event,
+      } = await setup(true);
+      let fire!: () => void;
+      const timedGroup = new MarmotGroup(
+        deserializeClientState(serializeClientState(group.state)),
+        {
+          store: manager.store,
+          signer: manager.signer,
+          network,
+          ciphersuite: group.ciphersuite,
+          scheduler: {
+            setTimer: (_ms, callback) => {
+              fire = callback;
+              return {};
+            },
+            clearTimer: () => {},
+          },
+        },
+      );
+      // Use the real facade, with session results controlled independently of cryptography.
+      const invalidation = {
+        kind: "stateInvalidated",
+        commitDigest: new Uint8Array(32),
+        forkEpoch: 1,
+        withdrawn: [],
+        disposition: { kind: "invalidated" },
+      } as DispositionedIngestResult;
+      const ingest = vi
+        .spyOn(timedGroup.session, "ingest")
+        .mockImplementation(async function* () {
+          yield invalidation;
+        });
+      vi.spyOn(timedGroup.session, "driveConvergence").mockResolvedValue([
+        invalidation,
+      ]);
+      vi.spyOn(manager, "get").mockResolvedValue(timedGroup);
+      // Registry-backed connectAll receives the same replacement through its public loaded event.
+      const results: DispositionedIngestResult[] = [];
+      manager.on("ingestResult", (_id, result) => {
+        if (result.kind === "stateInvalidated") results.push(result);
+      });
+      const handle =
+        mode === "connect"
+          ? await manager.connect(group.id)
+          : manager.connectAll();
+      if (mode === "connectAll") {
+        manager.unload(group.id);
+        manager.emit("loaded", timedGroup);
+      }
+      await subscribed.promise;
+      const emitted = deferred();
+      timedGroup.once("ingestResult", () => emitted.resolve());
+      observers.at(-1)!.next!(event("live"));
+      await emitted.promise;
+      expect(results).toEqual([invalidation]);
+      // A real inbound commit arms the settlement callback, then the controlled
+      // session driver supplies the invalidation on that timer edge.
+      ingest.mockRestore();
+      await peerGroup!.selfUpdate();
+      for await (const result of timedGroup.ingest([network.events.at(-1)!]))
+        void result;
+      expect(fire).toBeTypeOf("function");
+      const timerResult = deferred();
+      timedGroup.once("ingestResult", () => timerResult.resolve());
+      fire();
+      await timerResult.promise;
+      expect(results).toEqual([invalidation, invalidation]);
+      handle.unsubscribe();
+      expect(timedGroup.listenerCount("ingestResult")).toBe(0);
+    },
+  );
+});
+
 /** Resolve on the group's next applicationMessage, decoded; rejects after `ms`. */
-function nextMessage(group: MarmotGroup, ms = 2000): Promise<Rumor> {
+function nextMessage(group: MarmotGroup<any>, ms = 2000): Promise<Rumor> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("timed out")), ms);
     group.once("applicationMessage", (bytes: Uint8Array) => {
@@ -54,7 +376,13 @@ describe("GroupsManager.connect / connectAll (inbound transport)", () => {
   let ciphersuite: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let adminClient: MarmotClient;
-  let inviteeClient: MarmotClient;
+  let inviteeClient: MarmotClient<GroupRumorHistory>;
+  let memberStore: InMemoryKeyValueStore<SerializedClientState>;
+  let ingestStore: InMemoryKeyValueStore<Uint8Array>;
+  let rewindStore: InMemoryKeyValueStore<Uint8Array>;
+  let historyStore: InMemoryKeyValueStore<Rumor>;
+  const historyFactory = () =>
+    new GroupRumorHistory(new KeyValueRumorHistoryBackend(historyStore));
 
   beforeEach(async () => {
     adminAccount = PrivateKeyAccount.generateNew();
@@ -73,19 +401,563 @@ describe("GroupsManager.connect / connectAll (inbound transport)", () => {
       network: mockNetwork,
     });
 
+    memberStore = new InMemoryKeyValueStore<SerializedClientState>();
+    ingestStore = new InMemoryKeyValueStore<Uint8Array>();
+    rewindStore = new InMemoryKeyValueStore<Uint8Array>();
+    historyStore = new InMemoryKeyValueStore<Rumor>();
     inviteeClient = new MarmotClient({
-      groupStateStore: new InMemoryKeyValueStore<SerializedClientState>(),
+      groupStateStore: memberStore,
+      ingestStateStore: ingestStore,
+      rewindStore,
+      historyFactory,
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
     });
   });
+
+  it.each(
+    (["connect", "connectAll"] as const).flatMap((mode) =>
+      (["restart", "live", "timer", "reconverge", "failure"] as const).map(
+        (path) => [mode, path] as const,
+      ),
+    ),
+  )(
+    "%s retracts a real losing rumor via %s with its producing digest",
+    async (mode, path) => {
+      const { adminGroup, inviteeGroup } = await adminAndInvitee();
+      let now = 0;
+      let fire!: () => void;
+      const receiver =
+        path === "timer"
+          ? new MarmotGroup(
+              deserializeClientState(serializeClientState(inviteeGroup.state)),
+              {
+                store: memberStore,
+                ingestStateStore: ingestStore,
+                rewindStore,
+                history: historyFactory(),
+                signer: inviteeAccount.signer,
+                network: mockNetwork,
+                ciphersuite: inviteeGroup.ciphersuite,
+                now: () => now,
+                scheduler: {
+                  setTimer: (_ms, callback) => {
+                    fire = callback;
+                    return {};
+                  },
+                  clearTimer: () => {},
+                },
+              },
+            )
+          : inviteeGroup;
+      const context = {
+        cipherSuite: adminGroup.ciphersuite,
+        authService: unsafeTestingAuthenticationService,
+      };
+      const make = () =>
+        createCommit({
+          context,
+          state: adminGroup.state,
+          wireAsPublicMessage: true,
+          ratchetTreeExtension: true,
+          extraProposals: [],
+        });
+      const forks = await Promise.all([make(), make()]);
+      forks.sort((a, b) =>
+        bytesToHex(
+          commitDigest(encode(mlsMessageEncoder, a.commit)),
+        ).localeCompare(
+          bytesToHex(commitDigest(encode(mlsMessageEncoder, b.commit))),
+        ),
+      );
+      const [winning, losing] = forks;
+      const losingEvent = await createGroupEvent({
+        message: losing.commit,
+        state: adminGroup.state,
+        ciphersuite: adminGroup.ciphersuite,
+      });
+      const winningEvent = await createGroupEvent({
+        message: winning.commit,
+        state: adminGroup.state,
+        ciphersuite: adminGroup.ciphersuite,
+      });
+      for await (const r of receiver.ingest([losingEvent])) void r;
+      const rumor = chatRumor(
+        await adminAccount.signer.getPublicKey(),
+        "losing before restart",
+      );
+      const payload = serializeApplicationRumor(rumor);
+      const app = await createApplicationMessage({
+        context,
+        state: losing.newState,
+        message: payload,
+      });
+      const event = await createGroupEvent({
+        message: app.message,
+        state: losing.newState,
+        ciphersuite: adminGroup.ciphersuite,
+      });
+      const accepted = [];
+      for await (const r of receiver.ingest([event])) accepted.push(r);
+      expect(
+        accepted.some(
+          (r) =>
+            r.kind === "processed" && r.result.kind === "applicationMessage",
+        ),
+      ).toBe(true);
+      expect(await receiver.history.queryRumors({})).toEqual([rumor]);
+      const timeline = receiver.history.subscribe({ limit: 1 });
+      expect((await timeline.next()).value).toEqual([rumor]);
+      const restart = path === "restart" || path === "failure";
+      if (restart) inviteeClient.groups.unload(inviteeGroup.id);
+      const restarted = restart
+        ? new MarmotClient({
+            groupStateStore: memberStore,
+            ingestStateStore: ingestStore,
+            rewindStore,
+            historyFactory,
+            keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+            signer: inviteeAccount.signer,
+            network: mockNetwork,
+          })
+        : inviteeClient;
+      const restored = restart
+        ? await restarted.groups.get(inviteeGroup.id)
+        : receiver;
+      if (path === "timer") {
+        vi.spyOn(restarted.groups, "get").mockResolvedValue(restored);
+        restarted.groups.unload(inviteeGroup.id);
+      }
+      await timeline.return(undefined);
+      const subscribedTimeline = restored.history.subscribe({ limit: 1 });
+      expect((await subscribedTimeline.next()).value).toEqual([rumor]);
+      const errors: Error[] = [];
+      restored.on("historyError", (error) => errors.push(error));
+      const failure = new Error("removal offline");
+      const removal =
+        path === "failure"
+          ? vi.spyOn(historyStore, "removeItem").mockRejectedValue(failure)
+          : undefined;
+      const results: DispositionedIngestResult[] = [];
+      const invalidated = deferred();
+      restarted.groups.on("ingestResult", (_id, r) => {
+        if (r.kind === "invalidated") {
+          results.push(r);
+          invalidated.resolve();
+        }
+      });
+      const subscribed = deferred();
+      const original = mockNetwork.subscription.bind(mockNetwork);
+      vi.spyOn(mockNetwork, "subscription").mockImplementation((...args) => {
+        const stream = original(...args);
+        return {
+          subscribe(observer) {
+            const handle = stream.subscribe(observer);
+            subscribed.resolve();
+            return handle;
+          },
+        };
+      });
+      const handle =
+        mode === "connect"
+          ? await restarted.groups.connect(restored.id)
+          : restarted.groups.connectAll();
+      if (path === "timer" && mode === "connectAll")
+        restarted.groups.emit("loaded", restored);
+      await subscribed.promise;
+      if (path === "reconverge") {
+        restored.forkTree.recordCommit(
+          bytesToHex(adminGroup.state.confirmationTag),
+          winning.commit,
+          winning.newState,
+        );
+        await restored.reconverge();
+      } else {
+        if (path === "timer") now = 1_000_000;
+        await mockNetwork.publish(RELAYS, winningEvent);
+        if (path === "timer") {
+          // Fence connection admission before firing the retained-input continuation.
+          const fence = await restarted.groups.connect(restored.id);
+          fence.unsubscribe();
+          expect(results).toEqual([]);
+          expect(fire).toBeTypeOf("function");
+          fire();
+        }
+      }
+      await invalidated.promise;
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        kind: "invalidated",
+        event,
+        transportId: event.id,
+        rumorId: rumor.id,
+        payload,
+        tag: bytesToHex(losing.newState.confirmationTag),
+        epoch: Number(losing.newState.groupContext.epoch),
+        commitDigest: commitDigest(encode(mlsMessageEncoder, losing.commit)),
+      });
+      handle.unsubscribe();
+      let current = restored;
+      if (path === "failure") {
+        expect(errors).toContain(failure);
+        expect(await restored.history.queryRumors({})).toEqual([rumor]);
+        const saved = JSON.parse(
+          new TextDecoder().decode(
+            (await ingestStore.getItem(
+              `${bytesToHex(restored.id)}/delivered-payloads/v1`,
+            ))!,
+          ),
+        );
+        expect(saved.pending[0]).toMatchObject({
+          rumorId: rumor.id,
+          transportId: event.id,
+          commitDigest: bytesToHex(
+            commitDigest(encode(mlsMessageEncoder, losing.commit)),
+          ),
+        });
+        removal!.mockRestore();
+        restarted.groups.unload(restored.id);
+        const retried = new MarmotClient({
+          groupStateStore: memberStore,
+          ingestStateStore: ingestStore,
+          rewindStore,
+          historyFactory,
+          keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+          signer: inviteeAccount.signer,
+          network: mockNetwork,
+        });
+        const retryGroup = await retried.groups.get(restored.id);
+        current = retryGroup;
+        await expect(restored.reconverge()).rejects.toThrow("Group unloaded");
+        await retryGroup.reconverge();
+        expect(await retryGroup.history.queryRumors({})).toEqual([]);
+      } else {
+        expect((await subscribedTimeline.next()).value).toEqual([]);
+        expect(
+          await new KeyValueRumorHistoryBackend(historyStore).queryRumors({}),
+        ).toEqual([]);
+      }
+      await subscribedTimeline.return(undefined);
+      await current.reconverge();
+      expect(results).toHaveLength(1);
+    },
+  );
+
+  /** Real sibling commits and distinct sender ratchets, retaining stores for restart. */
+  async function losingDeliveries(contents: string[], shared = false) {
+    const { adminGroup, inviteeGroup: receiver } = await adminAndInvitee();
+    const context = {
+      cipherSuite: adminGroup.ciphersuite,
+      authService: unsafeTestingAuthenticationService,
+    };
+    const sharedRumor = shared
+      ? chatRumor(await adminAccount.signer.getPublicKey(), contents[0])
+      : undefined;
+    if (sharedRumor) {
+      const app = await createApplicationMessage({
+        context,
+        state: adminGroup.state,
+        message: serializeApplicationRumor(sharedRumor),
+      });
+      const event = await createGroupEvent({
+        message: app.message,
+        state: adminGroup.state,
+        ciphersuite: adminGroup.ciphersuite,
+      });
+      adminGroup.state = app.newState;
+      for await (const result of receiver.ingest([event])) void result;
+    }
+    const make = () =>
+      createCommit({
+        context,
+        state: adminGroup.state,
+        wireAsPublicMessage: true,
+        ratchetTreeExtension: true,
+        extraProposals: [],
+      });
+    const forks = await Promise.all([make(), make()]);
+    forks.sort((a, b) =>
+      bytesToHex(
+        commitDigest(encode(mlsMessageEncoder, a.commit)),
+      ).localeCompare(
+        bytesToHex(commitDigest(encode(mlsMessageEncoder, b.commit))),
+      ),
+    );
+    const [winning, losing] = forks;
+    const wrap = (
+      message: Parameters<typeof createGroupEvent>[0]["message"],
+      state: typeof adminGroup.state,
+    ) =>
+      createGroupEvent({ message, state, ciphersuite: adminGroup.ciphersuite });
+    const winningEvent = await wrap(winning.commit, adminGroup.state);
+    for await (const result of receiver.ingest([
+      await wrap(losing.commit, adminGroup.state),
+    ]))
+      void result;
+    let sender = losing.newState;
+    const rumors: Rumor[] = [];
+    for (const content of contents) {
+      const rumor =
+        sharedRumor ??
+        chatRumor(await adminAccount.signer.getPublicKey(), content);
+      rumors.push(rumor);
+      const app = await createApplicationMessage({
+        context,
+        state: sender,
+        message: serializeApplicationRumor(rumor),
+      });
+      const event = await wrap(app.message, sender);
+      sender = app.newState;
+      const accepted: DispositionedIngestResult[] = [];
+      for await (const result of receiver.ingest([event]))
+        accepted.push(result);
+      expect(
+        accepted.some(
+          (result) =>
+            result.kind === "processed" &&
+            result.result.kind === "applicationMessage",
+        ),
+      ).toBe(true);
+    }
+    const key = `${bytesToHex(receiver.id)}/delivered-payloads/v1`;
+    const snapshot = async () =>
+      JSON.parse(new TextDecoder().decode((await ingestStore.getItem(key))!));
+    const restart = async () => {
+      inviteeClient.groups.unload(receiver.id);
+      const client = new MarmotClient({
+        groupStateStore: memberStore,
+        ingestStateStore: ingestStore,
+        rewindStore,
+        historyFactory,
+        keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+        signer: inviteeAccount.signer,
+        network: mockNetwork,
+      });
+      return client.groups.get(receiver.id);
+    };
+    const winningDelivery = async (rumor: Rumor) => {
+      const app = await createApplicationMessage({
+        context,
+        state: winning.newState,
+        message: serializeApplicationRumor(rumor),
+      });
+      for await (const result of receiver.ingest([
+        await wrap(app.message, winning.newState),
+      ]))
+        void result;
+    };
+    return {
+      receiver,
+      winningEvent,
+      winningDelivery,
+      rumors,
+      snapshot,
+      restart,
+    };
+  }
+
+  it.each(["first invalidation", "before last removal"])(
+    "recovers the entire losing delivery batch after interruption at %s",
+    async (boundary) => {
+      const { receiver, winningEvent, rumors, snapshot, restart } =
+        await losingDeliveries(["one", "two", "three"]);
+      expect((await snapshot()).entries).toHaveLength(3);
+      const remove = historyStore.removeItem.bind(historyStore);
+      let calls = 0;
+      let pendingBeforeRemoval = 0;
+      const failure = vi
+        .spyOn(historyStore, "removeItem")
+        .mockImplementation(async (key) => {
+          calls++;
+          if (calls > (boundary === "first invalidation" ? 1 : 2))
+            throw new Error("interrupted cleanup");
+          // Every obligation must already be durable before the first history removal.
+          if (calls === 1)
+            pendingBeforeRemoval = (await snapshot()).pending.length;
+          await remove(key);
+        });
+      const iterator = receiver.ingest([winningEvent]);
+      while (true) {
+        const result = await iterator.next();
+        if (result.done) throw new Error("expected invalidation");
+        if (result.value.kind === "invalidated") break;
+      }
+      await iterator.return(undefined);
+      expect(pendingBeforeRemoval).toBe(3);
+      const saved = await snapshot();
+      expect(saved.entries).toHaveLength(0);
+      expect(saved.pending).toHaveLength(
+        boundary === "first invalidation" ? 2 : 1,
+      );
+      expect(await receiver.history.queryRumors({})).toHaveLength(
+        saved.pending.length,
+      );
+      expect(
+        saved.pending.every((entry: { rumorId: string }) =>
+          rumors.some((rumor) => rumor.id === entry.rumorId),
+        ),
+      ).toBe(true);
+      failure.mockRestore();
+      const restored = await restart();
+      await restored.reconverge();
+      expect(await restored.history.queryRumors({})).toEqual([]);
+      expect((await snapshot()).pending).toEqual([]);
+    },
+  );
+
+  it.each(["shared", "restored shared", "restored winning"])(
+    "preserves canonical rumor visibility while retracting a duplicate transport (%s)",
+    async (path) => {
+      const {
+        receiver,
+        winningEvent,
+        winningDelivery,
+        rumors,
+        snapshot,
+        restart,
+      } = await losingDeliveries(
+        ["same inner rumor"],
+        path !== "restored winning",
+      );
+      const removal = path.startsWith("restored")
+        ? vi
+            .spyOn(receiver.history, "removeMessage")
+            .mockRejectedValue(new Error("offline"))
+        : undefined;
+      const restoration =
+        path === "restored shared"
+          ? vi
+              .spyOn(receiver.history, "saveMessage")
+              .mockRejectedValue(new Error("offline"))
+          : undefined;
+      const removed = vi.fn();
+      receiver.history.on("removed", removed);
+      const invalidated: DispositionedIngestResult[] = [];
+      for await (const result of receiver.ingest([winningEvent]))
+        if (result.kind === "invalidated") invalidated.push(result);
+      expect(invalidated).toHaveLength(1);
+      expect(invalidated[0]).toMatchObject({
+        rumorId: rumors[0].id,
+        transportId: expect.any(String),
+      });
+      if (path === "restored winning") await winningDelivery(rumors[0]);
+      if (path.startsWith("restored"))
+        expect((await snapshot()).pending).toHaveLength(1);
+      expect(
+        (await snapshot()).entries.some(
+          (entry: { rumorId: string }) => entry.rumorId === rumors[0].id,
+        ),
+      ).toBe(true);
+      removal?.mockRestore();
+      restoration?.mockRestore();
+      const restored = await restart();
+      await restored.reconverge();
+      expect(await restored.history.queryRumors({})).toEqual([rumors[0]]);
+      expect((await snapshot()).pending).toEqual([]);
+      expect(await receiver.history.queryRumors({})).toEqual([rumors[0]]);
+      expect(removed).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["destroy", "manager destroy", "leave"])(
+    "%s purges plaintext delivery and pending evidence without touching another group",
+    async (path) => {
+      const { receiver, winningEvent, snapshot } = await losingDeliveries([
+        "private ledger content",
+      ]);
+      const removal = vi
+        .spyOn(receiver.history, "removeMessage")
+        .mockRejectedValue(new Error("offline"));
+      for await (const result of receiver.ingest([winningEvent])) void result;
+      expect((await snapshot()).pending).toHaveLength(1);
+      removal.mockRestore();
+      const unrelated = `other-group/delivered-payloads/v1`;
+      await ingestStore.setItem(unrelated, new Uint8Array([42]));
+      const id = bytesToHex(receiver.id);
+      if (path === "leave") await inviteeClient.groups.leave(receiver.id);
+      else if (path === "manager destroy")
+        await inviteeClient.groups.destroy(receiver.id);
+      else await receiver.destroy();
+      await receiver.destroy(); // Repeat cleanup is safe.
+      await receiver.save(true); // Stale references must not recreate the group.
+      expect(
+        (await ingestStore.keys()).filter((key: string) =>
+          key.startsWith(`${id}/`),
+        ),
+      ).toEqual([]);
+      expect(await ingestStore.getItem(unrelated)).toEqual(
+        new Uint8Array([42]),
+      );
+      expect(await memberStore.getItem(id)).toBeNull();
+      expect(await receiver.history.queryRumors({})).toEqual([]);
+      const restarted = new MarmotClient({
+        groupStateStore: memberStore,
+        ingestStateStore: ingestStore,
+        rewindStore,
+        historyFactory,
+        keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+        signer: inviteeAccount.signer,
+        network: mockNetwork,
+      });
+      await expect(restarted.groups.get(receiver.id)).rejects.toThrow();
+    },
+  );
+
+  it.each(["history", "delivery snapshot"])(
+    "destroy fences an admitted ingest paused in a %s write",
+    async (boundary) => {
+      const { receiver, winningEvent, winningDelivery, rumors } =
+        await losingDeliveries(["delayed private content"]);
+      for await (const result of receiver.ingest([winningEvent])) void result;
+      const entered = deferred();
+      const release = deferred();
+      if (boundary === "history") {
+        const set = historyStore.setItem.bind(historyStore);
+        vi.spyOn(historyStore, "setItem").mockImplementation(
+          async (key, value) => {
+            entered.resolve();
+            await release.promise;
+            return set(key, value);
+          },
+        );
+      } else {
+        const ledgerStore: GenericKeyValueStore<Uint8Array> = ingestStore;
+        const set = ledgerStore.setItem.bind(ledgerStore);
+        vi.spyOn(ledgerStore, "setItem").mockImplementation(
+          async (key: string, value: Uint8Array) => {
+            if (key.endsWith("/delivered-payloads/v1")) {
+              entered.resolve();
+              await release.promise;
+            }
+            return set(key, value);
+          },
+        );
+      }
+      const work = winningDelivery(rumors[0]);
+      await entered.promise;
+      const destruction = receiver.destroy();
+      release.resolve();
+      await work;
+      await destruction;
+      expect(
+        (await ingestStore.keys()).filter((key: string) =>
+          key.startsWith(`${bytesToHex(receiver.id)}/`),
+        ),
+      ).toEqual([]);
+      expect(await memberStore.getItem(bytesToHex(receiver.id))).toBeNull();
+      expect(await receiver.history.queryRumors({})).toEqual([]);
+      for await (const result of receiver.ingest([])) void result;
+      await receiver.reconverge();
+      expect(await memberStore.getItem(bytesToHex(receiver.id))).toBeNull();
+    },
+  );
 
   /** Admin creates a group and the invitee joins it. */
   async function adminAndInvitee(): Promise<{
     adminGroup: MarmotGroup;
-    inviteeGroup: MarmotGroup;
+    inviteeGroup: MarmotGroup<GroupRumorHistory>;
   }> {
     const adminPubkey = await adminAccount.signer.getPublicKey();
     const inviteePubkey = await inviteeAccount.signer.getPublicKey();

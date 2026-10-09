@@ -33,11 +33,12 @@ import {
   joinGroup,
   type LeafIndex,
   type MlsMessage,
+  type Proposal,
   mlsMessageEncoder,
   processMessage,
   unsafeTestingAuthenticationService,
 } from "ts-mls";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
@@ -64,7 +65,151 @@ import {
   CommitLegalityError,
   MarmotGroupEngine,
 } from "../group-engine.js";
-import type { GroupPeeler } from "../types.js";
+import type { GroupPeeler, ProposalContext, SendIntent } from "../types.js";
+import { framedCommitProposals } from "../wire-format.js";
+
+describe("ordered proposal builders (D-07)", () => {
+  it("flattens single and array builders in order with staged references and one context", async () => {
+    const { impl, adminPubkey, admin2Pubkey, epoch1 } = await twoAdminGroup();
+    const engine = new MarmotGroupEngine({
+      state: epoch1,
+      ciphersuite: impl,
+      peeler: testPeeler(impl),
+    });
+    const ref = await stageAdminPolicyProposal(engine, [
+      adminPubkey,
+      admin2Pubkey,
+    ]);
+    const adds: Proposal[] = [];
+    for (const slot of [1, 2, 3, 4]) {
+      const account = testAccount(slot);
+      const kp = await generateKeyPackage({
+        credential: createCredential(account.pubkey),
+        signer: account.signer,
+        ciphersuiteImpl: impl,
+      });
+      adds.push({
+        proposalType: defaultProposalTypes.add,
+        add: { keyPackage: kp.publicPackage },
+      });
+    }
+    const contexts: ProposalContext[] = [];
+    const calls: string[] = [];
+    const intent: SendIntent = {
+      kind: "commit",
+      actorPubkey: adminPubkey,
+      proposalRefs: [ref],
+      extraProposals: [
+        adds[0]!,
+        [
+          async (context) => {
+            contexts.push(context);
+            calls.push("single");
+            return adds[1]!;
+          },
+        ],
+        async (context) => {
+          contexts.push(context);
+          calls.push("array");
+          return adds.slice(2);
+        },
+      ],
+    };
+    const parent = engine.state;
+    const result = await engine.send(intent);
+    expect(result.kind).toBe("groupEvolution");
+    if (result.kind !== "groupEvolution") throw new Error("expected commit");
+    expect(calls).toEqual(["single", "array"]);
+    expect(contexts[0]).toBe(contexts[1]);
+    expect(contexts[0]!.state).toBe(parent);
+    const proposals = framedCommitProposals(
+      result.pending.commitMessage!,
+      parent,
+    )!;
+    expect(
+      proposals.filter((p) => p.proposalType === defaultProposalTypes.add),
+    ).toEqual(adds);
+    expect(
+      proposals.filter((p) => p.proposalType === appDataUpdateProposalType),
+    ).toHaveLength(1);
+    expect(Object.keys(parent.unappliedProposals)).toEqual([ref]);
+    engine.confirmPublished(result.pending);
+    expect(Object.keys(engine.state.unappliedProposals)).toHaveLength(0);
+  });
+
+  it("rejects an illegal later array member before wrapping or changing state", async () => {
+    const { impl, adminPubkey, admin2Pubkey, epoch1 } = await twoAdminGroup();
+    const peeler = testPeeler(impl);
+    const wrap = vi.spyOn(peeler, "wrapGroupMessage");
+    const engine = new MarmotGroupEngine({
+      state: epoch1,
+      ciphersuite: impl,
+      peeler,
+    });
+    const parentBytes = serializeClientState(engine.state);
+    await expect(
+      engine.send({
+        kind: "commit",
+        actorPubkey: adminPubkey,
+        extraProposals: [
+          async () => [
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                operation: "update",
+                update: encodeAdminPolicyV1([adminPubkey, admin2Pubkey]),
+              },
+            },
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                operation: "remove",
+              },
+            },
+          ],
+        ],
+      }),
+    ).rejects.toThrow(CommitLegalityError);
+    expect(wrap).not.toHaveBeenCalled();
+    expect(engine.lifecycle).toBe("Stable");
+    expect(serializeClientState(engine.state)).toEqual(parentBytes);
+  });
+
+  it.each([
+    { label: "empty array", result: [] },
+    { label: "null member", result: [null] },
+    { label: "nested array", result: [[]] },
+    {
+      label: "missing Add payload",
+      result: [{ proposalType: defaultProposalTypes.add }],
+    },
+  ])(
+    "rejects empty or malformed builder results: $label",
+    async ({ result }) => {
+      const { impl, adminPubkey, epoch1 } = await twoAdminGroup();
+      const peeler = testPeeler(impl);
+      const wrap = vi.spyOn(peeler, "wrapGroupMessage");
+      const engine = new MarmotGroupEngine({
+        state: epoch1,
+        ciphersuite: impl,
+        peeler,
+      });
+      const parent = engine.state;
+      await expect(
+        engine.send({
+          kind: "commit",
+          actorPubkey: adminPubkey,
+          extraProposals: [async () => result as unknown as Proposal[]],
+        }),
+      ).rejects.toThrow(/proposal/i);
+      expect(wrap).not.toHaveBeenCalled();
+      expect(engine.state).toBe(parent);
+      expect(engine.lifecycle).toBe("Stable");
+    },
+  );
+});
 
 function testPeeler(ciphersuite: CiphersuiteImpl): GroupPeeler<NostrEvent> {
   return {

@@ -42,6 +42,16 @@ class TestHistory implements BaseGroupHistory {
   async purgeMessages(): Promise<void> {
     this.messages.length = 0;
   }
+
+  async removeMessage(rumorId: string): Promise<void> {
+    for (let index = this.messages.length - 1; index >= 0; index--) {
+      if (
+        deserializeApplicationData(this.messages[index]).id.toLowerCase() ===
+        rumorId
+      )
+        this.messages.splice(index, 1);
+    }
+  }
 }
 
 /**
@@ -160,7 +170,7 @@ describe("chat messages via session/runtime", () => {
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
     });
   });
 
@@ -349,7 +359,7 @@ describe("chat messages via session/runtime", () => {
       keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
       historyFactory: () => history,
     });
 
@@ -402,7 +412,7 @@ describe("chat messages via session/runtime", () => {
       keyPackageStore: inviteeKeyPackageBackend,
       signer: inviteeAccount.signer,
       network: mockNetwork,
-      clientId: "test-invitee-device",
+      clientId: "cd".repeat(32),
     });
 
     const { inviteeGroup } = await setupTwoMemberGroup(

@@ -12,6 +12,7 @@ import {
   makeAppDataDictionaryExtension,
   processMessage,
   unsafeTestingAuthenticationService,
+  type Proposal,
   type Welcome,
 } from "ts-mls";
 import { describe, expect, it, vi } from "vitest";
@@ -43,6 +44,7 @@ import {
   GROUP_PROFILE_COMPONENT_ID,
 } from "../../../core/components/ids.js";
 import { encodeGroupProfileV1 } from "../../../core/components/group-profile.js";
+import { createGroupEvent } from "../../../core/group-message.js";
 import { generateKeyPackage } from "../../../core/key-package.js";
 import { InMemoryKeyValueStore } from "../../../extra";
 import type {
@@ -56,6 +58,55 @@ import {
 } from "../marmot-group.js";
 import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
 import type { WelcomeRecipient } from "../../transport/nostr/welcome-delivery.js";
+import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../../../core/components/ids.js";
+import { GroupsManager } from "../../groups-manager.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import type { GroupImageTransportRequest } from "../group-image-transport.js";
+import { NostrGroupPeeler } from "../nostr-peeler.js";
+import { encodeGroupBlossomImage } from "../../../core/components/blossom-image.js";
+import { encryptGroupImage } from "../../../core/group-image.js";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function imageOwner(maxPendingImageMutations?: number) {
+  const store = new InMemoryKeyValueStore<SerializedClientState>();
+  const network = new MockNetwork();
+  const manager = new GroupsManager({
+    store,
+    ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+    lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+    ingestPersistence: { kind: "durable" },
+    network,
+    signer: testAccount(6).signer,
+    maxPendingImageMutations,
+  });
+  const group = await manager.create("Image teardown", {
+    relays: network.relayUrls,
+  });
+  return { manager, group, store, network };
+}
+
+function uploadDescriptor(request: GroupImageTransportRequest) {
+  const hash = bytesToHex(sha256(request.body!));
+  return {
+    status: 201,
+    body: new TextEncoder().encode(
+      JSON.stringify({
+        sha256: hash,
+        size: request.body!.length,
+        type: "application/octet-stream",
+        uploaded: 1,
+        url: `https://images.test/${hash}`,
+      }),
+    ),
+  };
+}
 
 async function createTestGroupState(
   account: PrivateKeyAccount<any>,
@@ -78,6 +129,738 @@ async function createTestGroupState(
 }
 
 describe("MarmotGroup lifecycle (group-state.md)", () => {
+  it("closing an image upload wipes its owned input copy", async () => {
+    const { manager, group } = await imageOwner();
+    const gate = deferred<void>();
+    const bytes = Uint8Array.of(9, 8, 7);
+    const copy = vi.spyOn(bytes, "slice");
+    let entered = false;
+    const operation = manager.replaceGroupImage(group.id, bytes, "image/png", {
+      resolveEndpoints: async () => {
+        entered = true;
+        await gate.promise;
+        return ["https://images.test"];
+      },
+    });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    const owned = copy.mock.results[0]!.value as Uint8Array;
+    group.image.close();
+    expect(await operation).toEqual({ kind: "unavailable", reason: "closed" });
+    gate.resolve();
+    group.dispose();
+    expect(owned.every((byte) => byte === 0)).toBe(true);
+    expect(bytes).toEqual(Uint8Array.of(9, 8, 7));
+  });
+  it("a late old publication cannot release a newer same-ID mutation queue", async () => {
+    const { manager, group, network } = await imageOwner(1);
+    const oldAck = deferred<void>();
+    const publish = network.publish.bind(network);
+    const publisher = vi
+      .spyOn(network, "publish")
+      .mockImplementationOnce(async (...args) => {
+        const response = await publish(...args);
+        await oldAck.promise;
+        return response;
+      });
+    const transport = async (request: GroupImageTransportRequest) =>
+      uploadDescriptor(request);
+    const old = manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(1),
+      "image/png",
+      {
+        endpoints: ["https://images.test"],
+        transport,
+      },
+    );
+    const rejected = expect(old).rejects.toThrow(/unloaded/);
+    await vi.waitFor(() => expect(publisher).toHaveBeenCalledOnce());
+    await manager.unload(group.id);
+    const newer = await manager.get(group.id);
+    const upload = deferred<void>();
+    const nextTransport = vi.fn(async (request: GroupImageTransportRequest) => {
+      await upload.promise;
+      return uploadDescriptor(request);
+    });
+    const next = manager.replaceGroupImage(
+      newer.id,
+      Uint8Array.of(2),
+      "image/png",
+      {
+        endpoints: ["https://images.test"],
+        transport: nextTransport,
+      },
+    );
+    await vi.waitFor(() => expect(nextTransport).toHaveBeenCalledOnce());
+    oldAck.resolve();
+    await rejected;
+    expect(await manager.clearGroupImage(newer.id)).toEqual({
+      kind: "unavailable",
+      reason: "byte-limit",
+    });
+    expect(newer.image.source()).toEqual({ kind: "none" });
+    upload.resolve();
+    expect((await next).kind).toBe("published");
+    expect(newer.image.source().kind).toBe("blossom");
+    expect(group.image.closedSignal.aborted).toBe(true);
+    expect(newer.image.closedSignal.aborted).toBe(false);
+    await manager.unload(newer.id);
+  });
+  it.each(["unload", "destroy"] as const)(
+    "%s refuses late actual confirmed Welcome success",
+    async (mode) => {
+      const { manager, group, store } = await imageOwner();
+      const member = testAccount(9);
+      const kp = await generateKeyPackage({
+        credential: createCredential(member.pubkey),
+        ciphersuiteImpl: group.ciphersuite,
+        signer: member.signer,
+      });
+      const gate = deferred<void>();
+      const deliver = vi
+        .spyOn(group.runtime.welcomeDelivery, "deliverMany")
+        .mockImplementationOnce(async () => {
+          await gate.promise;
+          return [];
+        });
+      const confirm = vi.spyOn(group.session, "confirmPublished");
+      const operation = group.submitIntent({
+        kind: "commit",
+        actorPubkey: testAccount(6).pubkey,
+        welcomeRecipients: [
+          {
+            pubkey: member.pubkey,
+            keyPackageEventId: "kp",
+            keyPackageEvent: {} as NostrEvent,
+          },
+        ],
+        extraProposals: [
+          {
+            proposalType: defaultProposalTypes.add,
+            add: { keyPackage: kp.publicPackage },
+          },
+        ],
+      });
+      const rejected = expect(operation).rejects.toThrow(
+        mode === "unload" ? /unloaded/ : /destroyed/,
+      );
+      await vi.waitFor(() => expect(deliver).toHaveBeenCalledOnce());
+      expect(confirm).toHaveBeenCalledOnce();
+      const parent = group.session.parentToken;
+      await (mode === "unload"
+        ? manager.unload(group.id)
+        : manager.destroy(group.id));
+      gate.resolve();
+      await rejected;
+      expect(group.session.parentToken).toBe(parent);
+      expect(confirm).toHaveBeenCalledOnce();
+      expect((await store.keys()).length).toBe(mode === "unload" ? 1 : 0);
+      group.dispose();
+    },
+  );
+  it.each(["builder", "crypto", "wrapper"] as const)(
+    "destroy fences a late actual image %s preparation",
+    async (stage) => {
+      const { manager, group, store, network } = await imageOwner();
+      const before = group.session.parentToken;
+      const gate = deferred<void>();
+      let entered = false;
+      const proposal: Proposal = {
+        proposalType: appDataUpdateProposalType,
+        appDataUpdate: {
+          componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+          operation: "update" as const,
+          update: encodeGroupBlossomImage({ kind: "empty" }),
+        },
+      };
+      const signature = group.ciphersuite.signature;
+      const sign = signature.sign.bind(signature);
+      const wrap = NostrGroupPeeler.prototype.wrapGroupMessage;
+      const spy =
+        stage === "crypto"
+          ? vi
+              .spyOn(signature, "sign")
+              .mockImplementationOnce(async (...args) => {
+                const result = await sign(...args);
+                entered = true;
+                await gate.promise;
+                return result;
+              })
+          : stage === "wrapper"
+            ? vi
+                .spyOn(NostrGroupPeeler.prototype, "wrapGroupMessage")
+                .mockImplementationOnce(async function (
+                  this: NostrGroupPeeler,
+                  ...args
+                ) {
+                  const result = await wrap.call(this, ...args);
+                  entered = true;
+                  await gate.promise;
+                  return result;
+                })
+            : undefined;
+      try {
+        const operation = group.submitIntent({
+          kind: "commit",
+          actorPubkey: testAccount(6).pubkey,
+          expectedParent: before,
+          extraProposals: [
+            stage === "builder"
+              ? async () => {
+                  entered = true;
+                  await gate.promise;
+                  return proposal;
+                }
+              : proposal,
+          ],
+        });
+        const rejected = expect(operation).rejects.toThrow(/destroyed/);
+        await vi.waitFor(() => expect(entered).toBe(true));
+        const destruction = manager.destroy(group.id);
+        gate.resolve();
+        await Promise.all([rejected, destruction]);
+        expect(group.session.parentToken).toBe(before);
+        expect(group.lifecycle).toBe("Stable");
+        expect(network.events).toHaveLength(0);
+        expect(await store.keys()).toEqual([]);
+      } finally {
+        gate.resolve();
+        spy?.mockRestore();
+        group.dispose();
+      }
+    },
+  );
+
+  it("a late old image read cannot affect a reloaded group with the same ID", async () => {
+    const { manager, group, store } = await imageOwner();
+    const image = encryptGroupImage(Uint8Array.of(8), "image/png");
+    await manager.commit(group.id, {
+      expectedParent: group.session.parentToken,
+      extraProposals: [
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+            operation: "update",
+            update: encodeGroupBlossomImage(image.metadata),
+          },
+        },
+      ],
+    });
+    const response = deferred<void>();
+    let calls = 0;
+    const transport = vi.fn(async () => {
+      if (++calls === 1) await response.promise;
+      return { status: 200, body: image.ciphertext };
+    });
+    const profile = { endpoints: ["https://images.test"], transport };
+    const old = group.image.read(profile);
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+    await manager.unload(group.id);
+    expect(await old).toEqual({ kind: "unavailable", reason: "closed" });
+    const newer = await manager.get(group.id);
+    expect(newer).not.toBe(group);
+    const current = await newer.image.read(profile);
+    expect(current).toMatchObject({
+      kind: "available",
+      bytes: Uint8Array.of(8),
+    });
+    response.resolve();
+    await Promise.resolve();
+    group.dispose();
+    expect((await newer.image.read(profile)).kind).toBe("available");
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(await store.getItem(group.idStr)).toBeDefined();
+    newer.dispose();
+  });
+
+  it.each(["publish", "save"] as const)(
+    "destroy fences a late actual image %s and preserves the admitted-write barrier",
+    async (stage) => {
+      const { manager, group, store, network } = await imageOwner();
+      const before = group.session.parentToken;
+      const gate = deferred<void>();
+      let entered = false;
+      const saveItem = store.setItem.bind(store);
+      const publish = network.publish.bind(network);
+      const spy =
+        stage === "publish"
+          ? vi
+              .spyOn(network, "publish")
+              .mockImplementationOnce(async (...args) => {
+                const response = await publish(...args);
+                entered = true;
+                await gate.promise;
+                return response;
+              })
+          : vi
+              .spyOn(store, "setItem")
+              .mockImplementationOnce(
+                async (...args: [string, SerializedClientState]) => {
+                  entered = true;
+                  await gate.promise;
+                  return saveItem(...args);
+                },
+              );
+      const confirm = vi.spyOn(group.session, "confirmPublished");
+      const saved = vi.fn();
+      group.on("stateSaved", saved);
+      const transport = async (request: GroupImageTransportRequest) =>
+        uploadDescriptor(request);
+      const operation = manager.replaceGroupImage(
+        group.id,
+        Uint8Array.of(4),
+        "image/png",
+        { endpoints: ["https://images.test"], transport },
+      );
+      const rejected = expect(operation).rejects.toThrow(/destroyed/);
+      await vi.waitFor(() => expect(entered).toBe(true));
+      let destroyed = false;
+      const destruction = manager.destroy(group.id).then(() => {
+        destroyed = true;
+      });
+      await Promise.resolve();
+      if (stage === "save") expect(destroyed).toBe(false);
+      gate.resolve();
+      await Promise.all([rejected, destruction]);
+      expect(await store.keys()).toEqual([]);
+      expect(saved).not.toHaveBeenCalled();
+      expect(confirm).toHaveBeenCalledTimes(stage === "publish" ? 0 : 1);
+      if (stage === "publish") expect(group.session.parentToken).toBe(before);
+      spy.mockRestore();
+      group.dispose();
+    },
+  );
+  it("an unloaded session cannot save after deferred lifecycle hydration", async () => {
+    const { group: initial, store } = await imageOwner();
+    const impl = initial.ciphersuite;
+    const state = initial.state;
+    initial.dispose();
+    const hydration = deferred<Uint8Array | null>();
+    const lifecycleStore = new InMemoryKeyValueStore<Uint8Array>();
+    vi.spyOn(lifecycleStore, "getItem").mockReturnValue(hydration.promise);
+    const old = new MarmotGroup(state, {
+      store,
+      lifecycleStore,
+      ciphersuite: impl,
+      network: new MockNetwork(),
+      signer: testAccount(6).signer,
+    });
+    const saved = vi.fn();
+    old.on("stateSaved", saved);
+    const writes = vi.spyOn(store, "setItem");
+    const pending = old.save(true);
+    old.dispose();
+    hydration.resolve(null);
+    await pending;
+    const oldWrites = writes.mock.calls.length;
+    const newer = new MarmotGroup(state, {
+      store,
+      ciphersuite: impl,
+      network: new MockNetwork(),
+      signer: testAccount(6).signer,
+    });
+    await newer.save(true);
+    newer.dispose();
+    expect(oldWrites).toBe(0);
+    expect(saved).not.toHaveBeenCalled();
+    expect(writes).toHaveBeenCalledOnce();
+  });
+  it.each(["resolver", "policy"] as const)(
+    "explicit close refuses late upload %s completion",
+    async (stage) => {
+      const { manager, group, network } = await imageOwner();
+      const gate = deferred<void>();
+      let signal!: AbortSignal;
+      const transport = vi.fn(async (request: GroupImageTransportRequest) =>
+        uploadDescriptor(request),
+      );
+      const wait = async (_source: unknown, owned: AbortSignal) => {
+        signal = owned;
+        await gate.promise;
+      };
+      const operation = manager.replaceGroupImage(
+        group.id,
+        Uint8Array.of(1),
+        "image/png",
+        {
+          endpoints: ["https://images.test"],
+          transport,
+          ...(stage === "resolver"
+            ? {
+                resolveEndpoints: async (source, owned) => {
+                  await wait(source, owned);
+                  return ["https://images.test"];
+                },
+              }
+            : {
+                contactPolicy: async (request, owned) => {
+                  await wait(request, owned);
+                  return true;
+                },
+              }),
+        },
+      );
+      await vi.waitFor(() => expect(signal).toBeDefined());
+      group.image.close();
+      expect(await operation).toEqual({
+        kind: "unavailable",
+        reason: "closed",
+      });
+      expect(signal.aborted).toBe(true);
+      gate.resolve();
+      await Promise.resolve();
+      expect(transport).not.toHaveBeenCalled();
+      expect(network.events).toHaveLength(0);
+      group.dispose();
+    },
+  );
+
+  it.each(["before", "after"] as const)(
+    "explicit close releases a blocked identity %s upload and queued work",
+    async (stage) => {
+      const { manager, group, network } = await imageOwner();
+      const identity = deferred<string>();
+      const signer = vi.spyOn(manager.signer, "getPublicKey");
+      if (stage === "after")
+        signer.mockResolvedValueOnce(testAccount(6).pubkey);
+      signer.mockReturnValueOnce(identity.promise);
+      const transport = vi.fn(async (request: GroupImageTransportRequest) =>
+        uploadDescriptor(request),
+      );
+      const operation = manager.replaceGroupImage(
+        group.id,
+        Uint8Array.of(1),
+        "image/png",
+        {
+          endpoints: ["https://images.test"],
+          transport,
+        },
+      );
+      const first = expect(operation).rejects.toThrow(
+        /image mutation cancelled/,
+      );
+      const second = expect(manager.clearGroupImage(group.id)).rejects.toThrow(
+        /image mutation cancelled/,
+      );
+      await vi.waitFor(() =>
+        expect(signer).toHaveBeenCalledTimes(stage === "before" ? 1 : 2),
+      );
+      group.image.close();
+      await Promise.all([first, second]);
+      identity.resolve(testAccount(6).pubkey);
+      await Promise.resolve();
+      expect(network.events).toHaveLength(0);
+      expect(transport).toHaveBeenCalledTimes(stage === "before" ? 0 : 1);
+      signer.mockRestore();
+      group.dispose();
+    },
+  );
+  it("explicit image close aborts an active upload and releases queued mutations", async () => {
+    const { manager, group, network } = await imageOwner();
+    const response = deferred<void>();
+    let signal!: AbortSignal;
+    const transport = vi.fn(async (request: GroupImageTransportRequest) => {
+      signal = request.signal;
+      await response.promise;
+      return uploadDescriptor(request);
+    });
+    const operation = manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(1),
+      "image/png",
+      {
+        endpoints: ["https://images.test"],
+        transport,
+      },
+    );
+    const queued = manager
+      .clearGroupImage(group.id)
+      .catch((error) => String(error));
+    await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+    group.image.close();
+    group.image.close();
+    const aborted = signal.aborted;
+    const early = await Promise.race([
+      operation.then((result) => result.kind),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("pending"), 10),
+      ),
+    ]);
+    response.resolve();
+    await operation;
+    await queued;
+    group.dispose();
+    expect(aborted).toBe(true);
+    expect(early).toBe("unavailable");
+    expect(network.events).toHaveLength(0);
+  });
+
+  it.each(["unload", "destroy"] as const)(
+    "%s cancels a real upload response stream before storage teardown",
+    async (mode) => {
+      const { manager, group, store, network } = await imageOwner();
+      const cancel = vi.fn();
+      const stream = new ReadableStream<Uint8Array>({ cancel });
+      const fetch = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(stream, { status: 201 }));
+      try {
+        const operation = manager.replaceGroupImage(
+          group.id,
+          Uint8Array.of(7),
+          "image/png",
+          {
+            endpoints: ["https://images.test"],
+          },
+        );
+        await vi.waitFor(() => expect(stream.locked).toBe(true));
+        const teardown =
+          mode === "destroy"
+            ? manager.destroy(group.id)
+            : manager.unload(group.id);
+        expect(await operation).toEqual({
+          kind: "unavailable",
+          reason: "closed",
+        });
+        await teardown;
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(stream.locked).toBe(false);
+        expect(network.events).toHaveLength(0);
+        expect((await store.getItem(group.idStr)) !== null).toBe(
+          mode === "unload",
+        );
+      } finally {
+        fetch.mockRestore();
+        group.dispose();
+      }
+    },
+  );
+  it.each(["profile", "unload"] as const)(
+    "rechecks %s after an asynchronous image proposal builder",
+    async (change) => {
+      const account = testAccount(6);
+      const impl = await getCiphersuiteImpl(
+        "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+        defaultCryptoProvider,
+      );
+      const { clientState } = await createTestGroupState(account, impl);
+      const network = new MockNetwork();
+      const group = new MarmotGroup(clientState, {
+        store: new InMemoryKeyValueStore(),
+        signer: account.signer,
+        ciphersuite: impl,
+        network,
+      });
+      let release!: () => void;
+      let entered = false;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const operation = group.session.send({
+        kind: "commit",
+        actorPubkey: account.pubkey,
+        expectedParent: group.session.parentToken,
+        extraProposals: [
+          async () => {
+            entered = true;
+            await gate;
+            return {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                operation: "update",
+                update: new Uint8Array(5),
+              },
+            };
+          },
+        ],
+      });
+      const rejected = expect(operation).rejects.toThrow(
+        change === "profile" ? /supported group profile/ : /unloaded/,
+      );
+      await vi.waitFor(() => expect(entered).toBe(true));
+      if (change === "profile")
+        vi.spyOn(group.session, "profileSupport", "get").mockReturnValue({
+          kind: "unsupported",
+          proofReason: "missing-required-proof",
+        } as never);
+      else group.dispose();
+      release();
+      await rejected;
+      expect(group.lifecycle).toBe("Stable");
+      expect(network.events).toHaveLength(0);
+      group.dispose();
+    },
+  );
+  it("closes the image service immediately and idempotently on disposal", async () => {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const { clientState } = await createTestGroupState(account, impl);
+    const group = new MarmotGroup(clientState, {
+      store: new InMemoryKeyValueStore(),
+      signer: account.signer,
+      ciphersuite: impl,
+      network: new MockNetwork(),
+    });
+    const close = vi.spyOn(group.image, "close");
+    group.dispose();
+    group.dispose();
+    expect(close).toHaveBeenCalled();
+    expect(
+      await group.image.read({ endpoints: ["https://images.test"] }),
+    ).toEqual({ kind: "unavailable", reason: "closed" });
+  });
+  it("preserves a queued image parent token until convergence releases actual preparation", async () => {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const { clientState } = await createTestGroupState(account, impl);
+    const member = testAccount(9);
+    const memberKp = await generateKeyPackage({
+      credential: createCredential(member.pubkey),
+      ciphersuiteImpl: impl,
+      signer: member.signer,
+    });
+    const context = {
+      cipherSuite: impl,
+      authService: unsafeTestingAuthenticationService,
+    };
+    const added = await createCommit({
+      context,
+      state: clientState,
+      ratchetTreeExtension: true,
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: memberKp.publicPackage },
+        },
+      ],
+    });
+    const memberState = await joinGroup({
+      context,
+      welcome: added.welcome!.welcome!,
+      keyPackage: memberKp.publicPackage,
+      privateKeys: memberKp.privatePackage,
+      ratchetTree: undefined,
+    });
+    let nowMs = 0;
+    let scheduled: (() => void) | undefined;
+    const network = new MockNetwork(["wss://relay.test"]);
+    const group = new MarmotGroup(added.newState, {
+      store: new InMemoryKeyValueStore(),
+      signer: account.signer,
+      ciphersuite: impl,
+      network,
+      now: () => nowMs,
+      settlementQuiescenceMs: 1_000,
+      scheduler: {
+        setTimer(_ms, callback) {
+          scheduled = callback;
+          return callback;
+        },
+        clearTimer(handle) {
+          if (scheduled === handle) scheduled = undefined;
+        },
+      },
+    });
+    const advance = async () => {
+      const effects = await group.session.send({
+        kind: "commit",
+        actorPubkey: account.pubkey,
+      });
+      const work = effects.publish[0];
+      if (work.kind !== "groupEvolution") throw new Error("expected commit");
+      group.session.confirmPublished(work.pending);
+    };
+    const incoming = await createCommit({
+      context,
+      state: memberState,
+      wireAsPublicMessage: true,
+    });
+    const event = await createGroupEvent({
+      message: incoming.commit,
+      state: memberState,
+      ciphersuite: impl,
+    });
+    for await (const _result of group.ingest([event])) {
+      /* fully drain canonical transition */
+    }
+    expect(group.convergenceStatus).toBe("Syncing");
+    const intent = {
+      kind: "commit" as const,
+      actorPubkey: account.pubkey,
+      expectedParent: group.session.parentToken,
+      extraProposals: [
+        {
+          proposalType:
+            appDataUpdateProposalType as typeof appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+            operation: "update" as const,
+            update: new Uint8Array(5),
+          },
+        },
+      ],
+    };
+    const queued = group.submitIntent(intent);
+    const rejected = expect(queued).rejects.toThrow("canonical parent changed");
+    await advance();
+    const before = serializeClientState(group.state);
+    // Mutating the caller's object cannot rewrite already-admitted evidence.
+    intent.expectedParent = group.session.parentToken;
+    nowMs = 2_000;
+    if (!scheduled) throw new Error("expected settlement timer");
+    scheduled();
+    await rejected;
+    expect(serializeClientState(group.state)).toEqual(before);
+    expect(group.lifecycle).toBe("Stable");
+    expect(network.events).toHaveLength(0);
+    group.dispose();
+  });
+
+  it("rejects retained lifecycle APIs and publish effects after destruction without network calls", async () => {
+    const account = testAccount(6);
+    const impl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const { clientState } = await createTestGroupState(account, impl);
+    const network = new MockNetwork(["wss://relay.test"]);
+    const lifecycleStore = new InMemoryKeyValueStore<Uint8Array>();
+    const group = new MarmotGroup(clientState, {
+      store: new InMemoryKeyValueStore<SerializedClientState>(),
+      lifecycleStore,
+      ciphersuite: impl,
+      signer: account.signer,
+      network,
+    });
+    const effects = await group.session.requestDisband();
+    const work = effects.publish[0];
+    if (work.kind !== "groupEvolution") throw new Error("expected commit");
+    const epoch = group.state.groupContext.epoch;
+    await group.destroy();
+    const publish = vi.spyOn(network, "publish");
+    await expect(group.disband()).rejects.toThrow("Group destroyed");
+    await expect(group.enableDisbanding()).rejects.toThrow("Group destroyed");
+    await group.resumePendingDisband();
+    await expect(group.runtime.publishEffects(effects)).rejects.toThrow(
+      "Group destroyed",
+    );
+    expect(() => group.session.confirmPublished(work.pending)).toThrow(
+      "Group destroyed",
+    );
+    group.session.publishFailed(work.pending);
+    expect(group.state.groupContext.epoch).toBe(epoch);
+    expect(publish).not.toHaveBeenCalled();
+    expect(await lifecycleStore.keys()).toEqual([]);
+  });
+
   it("automatically regenerates disband after real convergence selects a deeper active branch", async () => {
     const adminAccount = testAccount(6);
     const admin = adminAccount.pubkey;

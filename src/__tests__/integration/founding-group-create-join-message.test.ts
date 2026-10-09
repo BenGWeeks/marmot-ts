@@ -87,7 +87,7 @@ describe("FOUND-05: founding group creation, joining, and first message (positiv
           keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
           signer: account.signer,
           network: mockNetwork,
-          clientId: `test-invitee-${index}`,
+          clientId: index.toString(16).padStart(64, "0"),
         }),
     );
   });

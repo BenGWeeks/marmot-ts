@@ -204,7 +204,8 @@ describe("makeLeafAppComponentsExtension", () => {
     // Proof bytes are nondeterministic (created_at, BIP-340 aux randomness),
     // so pin only a projection of the 0x0001 (app_components) and 0x0002
     // (SafeAAD) entries, reconstructed from the same builder the production
-    // leaf dictionary uses (PITFALLS 14).
+    // leaf dictionary uses (PITFALLS 14). The current projection includes
+    // implemented 0x8002 image support in addition to the pinned MDK baseline.
     const projectionExtension = makeAppDataDictionaryExtensionForProjection();
     expect(
       bytesToHex(
@@ -215,7 +216,9 @@ describe("makeLeafAppComponentsExtension", () => {
           ...projectionExtension.extensionData,
         ]),
       ),
-    ).toBe("00061d1c00011514000180018003800480058006800780088009800c00020100");
+    ).toBe(
+      "00061f1e000117160001800180028003800480058006800780088009800c00020100",
+    );
 
     function makeAppDataDictionaryExtensionForProjection() {
       // Bypasses makeAppComponentsExtension's SafeAAD guard (that guard is a

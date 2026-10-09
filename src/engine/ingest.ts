@@ -98,6 +98,9 @@ export type AppliedForkResolution<TEnvelope> =
         payload: Uint8Array;
         tag: string;
         epoch: number;
+        commitDigest?: Uint8Array;
+        transportId?: string;
+        rumorId?: string;
       }[];
       /**
        * Notifications withdrawn because the commit(s) that produced them were
@@ -1168,6 +1171,9 @@ export async function* ingestEnvelopes<TEnvelope>(
             payload: inv.payload,
             tag: inv.tag,
             epoch: inv.epoch,
+            commitDigest: inv.commitDigest,
+            transportId: inv.transportId,
+            rumorId: inv.rumorId,
           };
         }
       } else {

@@ -13,6 +13,25 @@ import { fakeVerifyEvent } from "../client/verify.js";
 import type { SerializedClientState } from "../core/client-state.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import type { GroupImageTransportRequest } from "../client/group/group-image-transport.js";
+import { proposeUpdateMetadata } from "../client/group/proposals/update-metadata.js";
+import { encryptGroupImage } from "../core/group-image.js";
+import { encodeGroupBlossomImage } from "../core/components/blossom-image.js";
+import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../core/components/ids.js";
+import {
+  appDataUpdateProposalType,
+  defaultProposalTypes,
+  createCommit,
+  joinGroup,
+} from "ts-mls";
+import { NostrGroupPeeler } from "../client/group/nostr-peeler.js";
+import { marmotAuthService } from "../core/auth-service.js";
+import { createGroupEvent } from "../core/group-message.js";
+import type { AuditSink, AuditContextOptions } from "../audit/types.js";
+import { generateKeyPackage } from "../core/key-package.js";
+import { createCredential } from "../core/credential.js";
 import { MockNetwork } from "./helpers/mock-network.js";
 import { testAccount } from "./helpers/test-accounts.js";
 import {
@@ -26,6 +45,751 @@ import {
 // creator's account identity proof.
 const ADMIN_ACCOUNT = testAccount(0);
 const ADMIN = ADMIN_ACCOUNT.pubkey;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function imageManager(
+  options: {
+    maxPendingImageMutations?: number;
+    audit?: AuditSink;
+    auditContext?: AuditContextOptions;
+  } = {},
+) {
+  const manager = new GroupsManager({
+    store: new InMemoryKeyValueStore(),
+    ingestStateStore: new InMemoryKeyValueStore(),
+    lifecycleStore: new InMemoryKeyValueStore(),
+    ingestPersistence: { kind: "durable" },
+    signer: ADMIN_ACCOUNT.signer,
+    network: new MockNetwork(),
+    ...options,
+  });
+  const group = await manager.create("Image queue", {
+    relays: ["wss://relay.test"],
+  });
+  return { manager, group };
+}
+
+describe("group image mutation queue", () => {
+  it("copies waiting image bytes and executes replace and clear in FIFO order", async () => {
+    const { manager, group } = await imageManager();
+    const gate = deferred<never[]>();
+    const submit = vi
+      .spyOn(group, "submitIntent")
+      .mockReturnValueOnce(gate.promise);
+    let ciphertext = new Uint8Array();
+    const transport = vi.fn(async (request: GroupImageTransportRequest) => {
+      if (request.method === "GET") return { status: 200, body: ciphertext };
+      ciphertext = request.body!.slice();
+      const hash = bytesToHex(sha256(ciphertext));
+      return {
+        status: 201,
+        body: new TextEncoder().encode(
+          JSON.stringify({
+            sha256: hash,
+            size: ciphertext.length,
+            type: "application/octet-stream",
+            uploaded: 1,
+            url: `https://images.test/${hash}`,
+          }),
+        ),
+      };
+    });
+    const profile = { endpoints: ["https://images.test"], transport };
+    const first = manager.clearGroupImage(group.id);
+    const bytes = Uint8Array.of(1, 2, 3);
+    const replacement = manager.replaceGroupImage(
+      group.id,
+      bytes,
+      "image/png",
+      profile,
+    );
+    bytes.fill(9);
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    expect(transport).not.toHaveBeenCalled();
+    gate.resolve([]);
+    await Promise.all([first, replacement]);
+    const read = await group.image.read(profile);
+    expect(read.kind).toBe("available");
+    if (read.kind === "available")
+      expect(read.bytes).toEqual(Uint8Array.of(1, 2, 3));
+    const clear = manager.clearGroupImage(group.id);
+    const second = manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(4),
+      "image/png",
+      profile,
+    );
+    await Promise.all([clear, second]);
+    expect(group.image.source().kind).toBe("blossom");
+    manager.unload(group.id);
+  });
+
+  it("allows an independent group and a fresh loaded instance to proceed at capacity", async () => {
+    const { manager, group } = await imageManager({
+      maxPendingImageMutations: 1,
+    });
+    const gate = deferred<never[]>();
+    vi.spyOn(group, "submitIntent").mockReturnValue(gate.promise);
+    const first = manager.clearGroupImage(group.id);
+    await vi.waitFor(() => expect(group.submitIntent).toHaveBeenCalledTimes(1));
+    expect(await manager.clearGroupImage(group.id)).toEqual({
+      kind: "unavailable",
+      reason: "byte-limit",
+    });
+    const other = await manager.create("Independent", {
+      relays: ["wss://relay.test"],
+    });
+    expect((await manager.clearGroupImage(other.id)).kind).toBe("published");
+    manager.unload(group.id);
+    const reloaded = await manager.get(group.id);
+    expect((await manager.clearGroupImage(reloaded.id)).kind).toBe("published");
+    gate.resolve([]);
+    await first.catch(() => undefined);
+    manager.unload(group.id);
+    manager.unload(other.id);
+  });
+  it("bounds admitted mutations at sixteen before retaining another operation", async () => {
+    const { manager, group } = await imageManager();
+    const gate = deferred<never[]>();
+    const submit = vi
+      .spyOn(group, "submitIntent")
+      .mockReturnValue(gate.promise);
+    const queued = Array.from({ length: 16 }, () =>
+      manager.clearGroupImage(group.id),
+    );
+    let refused: unknown;
+    const extra = manager.clearGroupImage(group.id).then((result) => {
+      refused = result;
+    });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+    gate.resolve([]);
+    await Promise.all([...queued, extra]);
+    expect(JSON.stringify(refused)).toBe(
+      JSON.stringify({ kind: "unavailable", reason: "byte-limit" }),
+    );
+    expect(submit).toHaveBeenCalledTimes(16);
+    manager.unload(group.id);
+  });
+
+  it("refuses old queued work after unloading instead of applying it to a new instance", async () => {
+    const { manager, group } = await imageManager();
+    const gate = deferred<never[]>();
+    vi.spyOn(group, "submitIntent").mockReturnValueOnce(gate.promise);
+    const first = manager.clearGroupImage(group.id);
+    const second = manager.clearGroupImage(group.id);
+    const rejected = expect(second).rejects.toThrow(
+      /unloaded|closed|destroyed/i,
+    );
+    await vi.waitFor(() => expect(group.submitIntent).toHaveBeenCalledTimes(1));
+    manager.unload(group.id);
+    const reloaded = await manager.get(group.id);
+    const submit = vi.spyOn(reloaded, "submitIntent").mockResolvedValue([]);
+    gate.resolve([]);
+    await first.catch(() => undefined);
+    await rejected;
+    expect(submit).not.toHaveBeenCalled();
+    manager.unload(group.id);
+  });
+
+  it.each([0, -1, Infinity, NaN, 1.5])(
+    "rejects invalid queue capacity %s",
+    (capacity) => {
+      expect(
+        () =>
+          new GroupsManager({
+            store: new EmptyGroupStateStore(),
+            signer: ADMIN_ACCOUNT.signer,
+            network: new MockNetwork(),
+            maxPendingImageMutations: capacity,
+          } as never),
+      ).toThrow(/positive|integer|finite/i);
+    },
+  );
+});
+
+function deferredImageUpload() {
+  const gate = deferred<void>();
+  let signal: AbortSignal | undefined;
+  const transport = vi.fn(async (request: GroupImageTransportRequest) => {
+    signal = request.signal;
+    await gate.promise;
+    const hash = bytesToHex(sha256(request.body!));
+    return {
+      status: 201,
+      body: new TextEncoder().encode(
+        JSON.stringify({
+          sha256: hash,
+          size: request.body!.length,
+          type: "application/octet-stream",
+          uploaded: 1,
+          url: `https://images.test/${hash}`,
+        }),
+      ),
+    };
+  });
+  return {
+    gate,
+    transport,
+    getSignal: () => signal,
+    profile: { endpoints: ["https://images.test"], transport },
+  };
+}
+
+describe("deferred group image authority", () => {
+  it.each(["staging", "publication"] as const)(
+    "rolls back an image commit cancelled at the actual %s handoff",
+    async (stage) => {
+      let cancel: (() => void) | undefined;
+      const { manager, group } = await imageManager({
+        auditContext: { engineId: "image-cancellation" },
+        audit: {
+          record(event) {
+            if (
+              (stage === "staging" &&
+                event.kind.type === "epoch_state_changed" &&
+                event.kind.new_state === "pending_publish") ||
+              (stage === "publication" && event.kind.type === "publish_attempt")
+            ) {
+              const callback = cancel;
+              cancel = undefined;
+              callback?.();
+            }
+          },
+        },
+      });
+      const before = group.session.parentToken;
+      const publish = vi.spyOn(manager.network, "publish");
+      cancel = () => group.image.close();
+      const result = await manager
+        .clearGroupImage(group.id)
+        .catch((error) => error);
+      expect(String(result)).toMatch(/unloaded|closed|cancelled/i);
+      await vi.waitFor(() => expect(group.lifecycle).toBe("Stable"));
+      expect(publish).not.toHaveBeenCalled();
+      expect(group.session.parentToken).toBe(before);
+      expect(group.image.source().kind).toBe("none");
+      await manager.commit(group.id, {
+        extraProposals: [
+          proposeUpdateMetadata({ name: "Usable after handoff" }),
+        ],
+      });
+      expect(publish).toHaveBeenCalledOnce();
+      manager.unload(group.id);
+    },
+  );
+  it.each(
+    (["replace", "clear"] as const).flatMap((mutation) =>
+      (["closed", "cancelled"] as const).flatMap((reason) =>
+        (["queue", "signing", "wrapping"] as const).map((stage) => ({
+          mutation,
+          reason,
+          stage,
+        })),
+      ),
+    ),
+  )(
+    "fences $mutation on $reason during actual $stage before publication",
+    async ({ mutation, reason, stage }) => {
+      const { manager, group } = await imageManager();
+      const upload = deferredImageUpload();
+      upload.gate.resolve();
+      if (mutation === "clear")
+        await manager.replaceGroupImage(
+          group.id,
+          Uint8Array.of(7),
+          "image/png",
+          upload.profile,
+        );
+      if (stage === "queue") {
+        // A real independently prepared inbound MLS commit creates the actual
+        // convergence wait; do not mock submitIntent or the session send path.
+        const member = testAccount(1);
+        const keyPackage = await generateKeyPackage({
+          credential: createCredential(member.pubkey),
+          ciphersuiteImpl: group.ciphersuite,
+          signer: member.signer,
+        });
+        const [added] = await group.submitIntent({
+          kind: "commit",
+          actorPubkey: ADMIN,
+          extraProposals: [
+            {
+              proposalType: defaultProposalTypes.add,
+              add: { keyPackage: keyPackage.publicPackage },
+            },
+          ],
+        });
+        if (added!.work.kind !== "groupEvolution")
+          throw new Error("expected member Welcome");
+        const parent = await joinGroup({
+          context: {
+            cipherSuite: group.ciphersuite,
+            authService: marmotAuthService,
+          },
+          welcome: added!.work.welcome!.welcome!,
+          keyPackage: keyPackage.publicPackage,
+          privateKeys: keyPackage.privatePackage,
+          ratchetTree: undefined,
+        });
+        const incoming = await createCommit({
+          context: {
+            cipherSuite: group.ciphersuite,
+            authService: marmotAuthService,
+          },
+          state: parent,
+          wireAsPublicMessage: true,
+        });
+        const event = await createGroupEvent({
+          message: incoming.commit,
+          state: parent,
+          ciphersuite: group.ciphersuite,
+        });
+        for await (const _result of group.ingest([event])) {
+          /* drain */
+        }
+        expect(group.convergenceStatus).toBe("Syncing");
+      }
+      const before = group.session.parentToken;
+      const source = structuredClone(group.image.source());
+      const publish = vi.spyOn(manager.network, "publish");
+      const send = vi.spyOn(group.session, "send");
+      const submitted = vi.spyOn(group, "submitIntent");
+      const gate = deferred<void>();
+      let entered = false;
+      const signature = group.ciphersuite.signature;
+      const sign = signature.sign.bind(signature);
+      const wrap = NostrGroupPeeler.prototype.wrapGroupMessage;
+      const spy =
+        stage === "signing"
+          ? vi
+              .spyOn(signature, "sign")
+              .mockImplementationOnce(async (...args) => {
+                const value = await sign(...args);
+                entered = true;
+                await gate.promise;
+                return value;
+              })
+          : stage === "wrapping"
+            ? vi
+                .spyOn(NostrGroupPeeler.prototype, "wrapGroupMessage")
+                .mockImplementationOnce(async function (
+                  this: NostrGroupPeeler,
+                  ...args
+                ) {
+                  const value = await wrap.call(this, ...args);
+                  entered = true;
+                  await gate.promise;
+                  return value;
+                })
+            : undefined;
+      const controller = new AbortController();
+      try {
+        let outcome: unknown;
+        const operation = (
+          mutation === "replace"
+            ? manager.replaceGroupImage(
+                group.id,
+                Uint8Array.of(1, 2, 3),
+                "image/png",
+                upload.profile,
+                { signal: controller.signal },
+              )
+            : manager.clearGroupImage(group.id, { signal: controller.signal })
+        ).then(
+          (result) => {
+            outcome = result;
+          },
+          (error) => {
+            outcome = error;
+          },
+        );
+        await vi.waitFor(() => {
+          if (stage === "queue") expect(submitted).toHaveBeenCalledOnce();
+          else expect(entered).toBe(true);
+        });
+        // Also release another manager FIFO waiter, without releasing the blocked
+        // signing/wrapping continuation or waiting for convergence settlement.
+        let follower: unknown;
+        const queued = manager
+          .clearGroupImage(group.id, { signal: controller.signal })
+          .then(
+            (result) => {
+              follower = result;
+            },
+            (error) => {
+              follower = error;
+            },
+          );
+        if (reason === "closed") group.image.close();
+        else controller.abort();
+        await vi.waitFor(() => {
+          expect(outcome).toBeDefined();
+          expect(follower).toBeDefined();
+        });
+        await Promise.all([operation, queued]);
+        if (reason === "cancelled") {
+          expect(outcome).toEqual({ kind: "unavailable", reason });
+          expect(follower).toEqual({ kind: "unavailable", reason });
+        } else {
+          expect(String(outcome)).toMatch(/unloaded|closed|cancelled/i);
+          expect(String(follower)).toMatch(/unloaded|closed|cancelled/i);
+        }
+        expect(publish).not.toHaveBeenCalled();
+        expect(group.session.parentToken).toBe(before);
+        expect(group.image.source()).toEqual(source);
+        expect(group.lifecycle).toBe("Stable");
+        if (stage === "queue") {
+          expect(send).not.toHaveBeenCalled();
+          await vi.waitFor(
+            () => expect(group.convergenceStatus).toBe("Settled"),
+            { timeout: 2000 },
+          );
+          // Cancelled queue entries must not reach preparation when it drains.
+          expect(send).not.toHaveBeenCalled();
+        }
+        // Ordinary group work remains usable while cancelled crypto is still
+        // pending. Its subsequent canonical state must survive late settlement.
+        await manager.commit(group.id, {
+          extraProposals: [proposeUpdateMetadata({ name: "Still usable" })],
+        });
+        const afterOrdinary = group.session.parentToken;
+        expect(afterOrdinary).not.toBe(before);
+        gate.resolve();
+        await vi.waitFor(() =>
+          expect(
+            send.mock.results.filter((result) => result.type === "return")
+              .length,
+          ).toBeGreaterThan(0),
+        );
+        await Promise.allSettled(
+          send.mock.results
+            .filter((result) => result.type === "return")
+            .map((result) => result.value),
+        );
+        expect(publish).toHaveBeenCalledOnce();
+        expect(group.session.parentToken).toBe(afterOrdinary);
+        expect(group.image.source()).toEqual(source);
+        expect(group.lifecycle).toBe("Stable");
+      } finally {
+        gate.resolve();
+        spy?.mockRestore();
+        send.mockRestore();
+        submitted.mockRestore();
+        manager.unload(group.id);
+      }
+    },
+  );
+
+  it.each(["replace", "clear"] as const)(
+    "keeps %s publication outcome after image close and caller abort during transport",
+    async (mutation) => {
+      const { manager, group } = await imageManager();
+      const upload = deferredImageUpload();
+      upload.gate.resolve();
+      await manager.replaceGroupImage(
+        group.id,
+        Uint8Array.of(7),
+        "image/png",
+        upload.profile,
+      );
+      const before = group.session.parentToken;
+      const source = structuredClone(group.image.source());
+      const controller = new AbortController();
+      const gate = deferred<void>();
+      const original = manager.network.publish.bind(manager.network);
+      const publish = vi
+        .spyOn(manager.network, "publish")
+        .mockImplementationOnce(async (...args) => {
+          await gate.promise;
+          return original(...args);
+        });
+      try {
+        const operation =
+          mutation === "replace"
+            ? manager.replaceGroupImage(
+                group.id,
+                Uint8Array.of(1),
+                "image/png",
+                upload.profile,
+                { signal: controller.signal },
+              )
+            : manager.clearGroupImage(group.id, { signal: controller.signal });
+        await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
+        group.image.close();
+        controller.abort();
+        gate.resolve();
+        const result = await operation;
+        expect(result.kind).toBe("published");
+        if (result.kind !== "published")
+          throw new Error("expected confirmed publication");
+        expect(result.publications[0]!.retryPublication).toBe(false);
+        expect(result.publications[0]!.persistence).toEqual({
+          kind: "succeeded",
+        });
+        expect(group.session.parentToken).not.toBe(before);
+        expect(group.image.source()).not.toEqual(source);
+        expect(publish).toHaveBeenCalledOnce();
+      } finally {
+        gate.resolve();
+        publish.mockRestore();
+        manager.unload(group.id);
+      }
+    },
+  );
+
+  it("cancels a manager FIFO waiter promptly without letting its successor overtake an upload", async () => {
+    const { manager, group } = await imageManager({
+      maxPendingImageMutations: 2,
+    });
+    const upload = deferredImageUpload();
+    const first = manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(1),
+      "image/png",
+      upload.profile,
+    );
+    await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+    const controller = new AbortController();
+    const second = manager.clearGroupImage(group.id, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    expect(await second).toEqual({ kind: "unavailable", reason: "cancelled" });
+    const submit = vi.spyOn(group, "submitIntent");
+    const third = manager.clearGroupImage(group.id);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(submit).not.toHaveBeenCalled();
+    upload.gate.resolve();
+    expect((await first).kind).toBe("published");
+    expect((await third).kind).toBe("published");
+    expect(group.image.source().kind).toBe("none");
+    manager.unload(group.id);
+  });
+
+  it("releases queued mutations on closure without waiting for a blocked identity signer", async () => {
+    const { manager, group } = await imageManager();
+    const identity = deferred<string>();
+    const signer = vi
+      .spyOn(manager.signer, "getPublicKey")
+      .mockReturnValueOnce(identity.promise);
+    let settled = 0;
+    const first = manager.clearGroupImage(group.id).catch(() => {
+      settled++;
+    });
+    const second = manager.clearGroupImage(group.id).catch(() => {
+      settled++;
+    });
+    await vi.waitFor(() => expect(signer).toHaveBeenCalledOnce());
+    manager.unload(group.id);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const released = settled;
+    identity.resolve(ADMIN);
+    await Promise.all([first, second]);
+    signer.mockRestore();
+    expect(released).toBe(2);
+  });
+
+  it("refuses an upload after real canonical admin demotion", async () => {
+    const { manager, group } = await imageManager();
+    const member = testAccount(1);
+    const keyPackage = await generateKeyPackage({
+      credential: createCredential(member.pubkey),
+      ciphersuiteImpl: group.ciphersuite,
+      signer: member.signer,
+    });
+    await manager.commit(group.id, {
+      extraProposals: [
+        {
+          proposalType: defaultProposalTypes.add,
+          add: { keyPackage: keyPackage.publicPackage },
+        },
+      ],
+    });
+    const upload = deferredImageUpload();
+    const operation = manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(1),
+      "image/png",
+      upload.profile,
+    );
+    const rejected = expect(operation).rejects.toThrow("active group admin");
+    await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+    await manager.commit(group.id, {
+      extraProposals: [
+        proposeUpdateMetadata({ adminPubkeys: [member.pubkey] }),
+      ],
+    });
+    const before = group.session.parentToken;
+    const submit = vi.spyOn(group, "submitIntent");
+    upload.gate.resolve();
+    await rejected;
+    expect(submit).not.toHaveBeenCalled();
+    expect(group.session.parentToken).toBe(before);
+    expect(group.image.source().kind).toBe("none");
+    manager.unload(group.id);
+  });
+
+  it.each(["membership", "lifecycle", "identity"] as const)(
+    "rechecks %s after deferred upload",
+    async (change) => {
+      const { manager, group } = await imageManager();
+      const upload = deferredImageUpload();
+      const operation = manager.replaceGroupImage(
+        group.id,
+        Uint8Array.of(1),
+        "image/png",
+        upload.profile,
+      );
+      const rejected = expect(operation).rejects.toThrow(
+        /admin|lifecycle|actor/,
+      );
+      await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+      if (change === "membership")
+        vi.spyOn(group, "status", "get").mockReturnValue("removed");
+      if (change === "lifecycle")
+        vi.spyOn(group, "lifecycle", "get").mockReturnValue("Recovering");
+      const identity =
+        change === "identity"
+          ? vi
+              .spyOn(manager.signer, "getPublicKey")
+              .mockResolvedValue(testAccount(1).pubkey)
+          : undefined;
+      const submit = vi.spyOn(group, "submitIntent");
+      upload.gate.resolve();
+      await rejected;
+      identity?.mockRestore();
+      expect(submit).not.toHaveBeenCalled();
+      expect(group.image.source().kind).toBe("none");
+      manager.unload(group.id);
+    },
+  );
+
+  it("keeps confirmed image metadata and returns persistence failure without republishing", async () => {
+    const { manager, group } = await imageManager();
+    const upload = deferredImageUpload();
+    upload.gate.resolve();
+    vi.spyOn(manager.store, "setItem").mockRejectedValue(
+      new Error("disk full"),
+    );
+    const publish = vi.spyOn(manager.network, "publish");
+    const result = await manager.replaceGroupImage(
+      group.id,
+      Uint8Array.of(1),
+      "image/png",
+      upload.profile,
+    );
+    expect(result.kind).toBe("published");
+    if (result.kind !== "published")
+      throw new Error("expected publication outcome");
+    expect(result.publications[0]!.persistence).toEqual({
+      kind: "failed",
+      error: "disk full",
+    });
+    expect(result.publications[0]!.retryPublication).toBe(false);
+    expect(group.image.source().kind).toBe("blossom");
+    expect(publish).toHaveBeenCalledOnce();
+    manager.unload(group.id);
+  });
+
+  it("rechecks profile support after upload before submitting any intent", async () => {
+    const { manager, group } = await imageManager();
+    const upload = deferredImageUpload();
+    const submit = vi.spyOn(group, "submitIntent");
+    const operation = manager
+      .replaceGroupImage(
+        group.id,
+        Uint8Array.of(1),
+        "image/png",
+        upload.profile,
+      )
+      .catch((error) => error);
+    await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+    vi.spyOn(group, "profileSupport", "get").mockReturnValue({
+      kind: "unsupported",
+      proofReason: "missing-required-proof",
+    } as never);
+    upload.gate.resolve();
+    await operation;
+    expect(submit.mock.calls.length).toBe(0);
+    expect(group.image.source().kind).toBe("none");
+    manager.unload(group.id);
+  });
+
+  it.each(["clear", "url", "replacement"] as const)(
+    "refuses an uploaded candidate before submission after canonical %s",
+    async (change) => {
+      const { manager, group } = await imageManager();
+      const upload = deferredImageUpload();
+      const operation = manager
+        .replaceGroupImage(
+          group.id,
+          Uint8Array.of(1),
+          "image/png",
+          upload.profile,
+        )
+        .catch((error) => error);
+      await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+      if (change === "url")
+        await manager.commit(group.id, {
+          extraProposals: [
+            proposeUpdateMetadata({ avatarUrl: "https://avatar.test/a" }),
+          ],
+        });
+      else
+        await manager.commit(group.id, {
+          expectedParent: group.session.parentToken,
+          extraProposals: [
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                operation: "update",
+                update: encodeGroupBlossomImage(
+                  change === "clear"
+                    ? { kind: "empty" }
+                    : encryptGroupImage(Uint8Array.of(2), "image/png").metadata,
+                ),
+              },
+            },
+          ],
+        });
+      const submit = vi.spyOn(group, "submitIntent");
+      const before = group.session.parentToken;
+      upload.gate.resolve();
+      await operation;
+      expect(submit.mock.calls.length).toBe(0);
+      expect(group.session.parentToken).toBe(before);
+      manager.unload(group.id);
+    },
+  );
+
+  it("aborts an admitted upload when its owning facade is disposed", async () => {
+    const { manager, group } = await imageManager();
+    const upload = deferredImageUpload();
+    const operation = manager
+      .replaceGroupImage(
+        group.id,
+        Uint8Array.of(1),
+        "image/png",
+        upload.profile,
+      )
+      .catch((error) => error);
+    await vi.waitFor(() => expect(upload.transport).toHaveBeenCalledOnce());
+    manager.unload(group.id);
+    const aborted = upload.getSignal()!.aborted;
+    upload.gate.resolve();
+    await operation;
+    expect(aborted).toBe(true);
+  });
+});
 
 class EmptyGroupStateStore implements GenericKeyValueStore<SerializedClientState> {
   async getItem(): Promise<SerializedClientState | null> {
@@ -49,6 +813,119 @@ class EmptyGroupStateStore implements GenericKeyValueStore<SerializedClientState
 }
 
 describe("GroupsManager", () => {
+  function watchManager() {
+    return new GroupsManager({
+      store: new EmptyGroupStateStore(),
+      signer: {} as never,
+      network: {} as NostrNetworkInterface,
+    });
+  }
+
+  it("an already aborted watch yields nothing and retains no listeners", async () => {
+    const manager = watchManager();
+    const controller = new AbortController();
+    controller.abort();
+    const watcher = manager.watch({ signal: controller.signal });
+    const result = await watcher.next();
+    await watcher.return(undefined);
+    expect(result.done).toBe(true);
+    expect(manager.listenerCount("updated")).toBe(0);
+  });
+
+  it("abort releases idle watch listeners and completes next without an update", async () => {
+    const manager = watchManager();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const watcher = manager.watch({ signal: controller.signal });
+    await watcher.next();
+    const pending = watcher.next();
+    await Promise.resolve();
+    controller.abort();
+    const remaining = manager.listenerCount("updated");
+    // Release the old implementation for an assertion-based RED, avoiding timeout evidence.
+    if (remaining) manager.emit("updated", []);
+    const result = await pending;
+    await watcher.return(undefined);
+    expect(remaining).toBe(0);
+    expect(result.done).toBe(true);
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(remove.mock.calls[0]!.slice(0, 2)).toEqual(
+      add.mock.calls[0]!.slice(0, 2),
+    );
+  });
+
+  it("return wakes an outstanding idle next and releases listeners", async () => {
+    const manager = watchManager();
+    const watcher = manager.watch();
+    await watcher.next();
+    const pending = watcher.next();
+    await Promise.resolve();
+    const returned = watcher.return(undefined);
+    const remaining = manager.listenerCount("updated");
+    if (remaining) manager.emit("updated", []);
+    const result = await pending;
+    await returned;
+    expect(remaining).toBe(0);
+    expect(result.done).toBe(true);
+  });
+
+  it("retains an update racing with a blocked snapshot", async () => {
+    const manager = watchManager();
+    let release!: (groups: never[]) => void;
+    const snapshot = new Promise<never[]>((resolve) => {
+      release = resolve;
+    });
+    const load = vi
+      .spyOn(manager, "loadAll")
+      .mockReturnValueOnce(snapshot)
+      .mockResolvedValue([]);
+    const watcher = manager.watch();
+    const initial = watcher.next();
+    manager.emit("updated", []);
+    release([]);
+    await initial;
+    const next = watcher.next();
+    await Promise.resolve();
+    const loads = load.mock.calls.length;
+    if (loads === 1) manager.emit("updated", []);
+    await next;
+    await watcher.return(undefined);
+    expect(loads).toBe(2);
+  });
+
+  it("return cancels a blocked initial load and repeated watchers release abort listeners", async () => {
+    const manager = watchManager();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    let release!: (groups: never[]) => void;
+    const snapshot = new Promise<never[]>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(manager, "loadAll")
+      .mockReturnValueOnce(snapshot)
+      .mockResolvedValue([]);
+    const watcher = manager.watch({ signal: controller.signal });
+    const pending = watcher.next();
+    const returned = watcher.return(undefined);
+    const remaining = manager.listenerCount("updated");
+    release([]);
+    const result = await pending;
+    await returned;
+    expect(remaining).toBe(0);
+    expect(result.done).toBe(true);
+    for (let i = 0; i < 3; i++) {
+      const next = manager.watch({ signal: controller.signal });
+      await next.next();
+      await next.return(undefined);
+    }
+    expect(manager.listenerCount("updated")).toBe(0);
+    expect(add).toHaveBeenCalledTimes(4);
+    expect(remove).toHaveBeenCalledTimes(4);
+  });
+
   it("watch emits a new array instance for every update", async () => {
     const manager = new GroupsManager({
       store: new EmptyGroupStateStore(),
@@ -678,7 +1555,15 @@ describe("GroupsManager #connectGroup drain — trust boundary (SEC-01/WIRE-02)"
 
     // The genuine, validly-signed event (same id) now arrives via the live
     // subscription. It must NOT be censored by the poisoned dedup slot.
+    let admitted!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      admitted = resolve;
+    });
+    ingestSpy.mockImplementation(async function* () {
+      admitted();
+    });
     await network.publish(["wss://relay.test"], genuine);
+    await admission;
 
     expect(ingestSpy).toHaveBeenCalledTimes(1);
     expect(ingestSpy).toHaveBeenCalledWith([genuine]);

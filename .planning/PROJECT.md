@@ -19,7 +19,11 @@ correctly, across every supported runtime.
 
 ## Current State
 
-**v2.0 Account identity proof v2 — shipped 2026-10-05** (phases 6–11, 27 plans, 27/27 requirements).
+**v2.1 Protocol hardening and group images — completed 2026-10-09** (phases 12–13, 17 plans, 23/23 requirements).
+
+The library now provides conformant KeyPackage lifecycle and complete tentative Welcome validation, serializes ingestion and durable history retractions, preserves immutable retention envelopes, and exposes verified encrypted image read/upload/replace/clear with candidate-parent admin and cancellation guards. This is a development milestone, separate from npm v0.6.0 release preparation.
+
+Built on v2.0 Account identity proof v2 (completed 2026-10-05; phases 6–11, 27 plans, 27/27 requirements).
 See `.planning/MILESTONES.md` and [milestone summary](MILESTONES.md).
 
 marmot-ts now speaks the adopted Current profile: KeyPackages and leaves carry the
@@ -37,14 +41,7 @@ and the six-runtime CI matrix.
 
 ## Next Milestone Goals
 
-Not yet defined — run `/gsd-new-milestone`. Candidates:
-
-- Backlog 999.1 group image support, 999.2 docs review ahead of the next release, 999.7 invite-only
-  client mode (no KeyPackage identifier)
-- Shelved 999.3–999.6 audit/closure phases (re-scope against current refs first)
-- v2.0 tech debt from the archived v2.0 audit (see [release follow-ups](RELEASE-FOLLOWUPS.md)): regression tests for Phase 8 WR-01..03,
-  Phase 10 WR-06 foundingAdd TOCTOU, Phase 11 export-guard gaps (PUBLIC_SURFACES ↔ package.json exports)
-- Deferred tracks: multi-device (MDEV-01), push (PUSH-01) — both reuse the `MarmotAuthorizationProof` primitive
+No next milestone is selected. Typing/documentation debt, optional workflow ledger repairs and individually undispositioned release findings remain for later work in [RELEASE-FOLLOWUPS.md](RELEASE-FOLLOWUPS.md).
 
 ## Requirements
 
@@ -86,20 +83,23 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
 - ✓ FOUND-01..05 founding group creation via Welcome only (internal founding Add Commit never published, Welcome-only invitee join, per-invitee retryable ack-aware delivery, fail-closed relay-less founding create) — v2.0 _(Validated in Phase 10: Founding Group Creation via Welcome)_
 - ✓ QA-04 / QA-05 full suite green on Node 20/22/24, Deno 2, Bun latest/1.1 (CI run 37328779021 on c2f5a12) and exports snapshot reflects the `0x8009` cutover with `0xf2f1` only in the CUT-02 keep set — v2.0 _(Validated in Phase 11: Exports Snapshot & QA Gate)_
 
+- ✓ Protocol/client review follow-ups: conformant KeyPackages, authenticated Welcome admin validation, serialized connections, durable history retractions, cancellable watches and exact retention hints — Phase 12 (12/12 requirements verified).
+
+- ✓ Encrypted group-image workflow: strict metadata/crypto, verified bounded retrieval, guarded admin upload/replace/clear, URL precedence and cancellation-safe ownership — Phase 13 (11/11 requirements verified).
+
 ### Active
 
-<!-- Hypotheses for the next milestone; refined by /gsd-new-milestone. -->
+No active implementation requirements. Define fresh requirements with the next milestone.
 
-(None yet — define with `/gsd-new-milestone`.)
+All 23 v2.1 requirements are satisfied; archived evidence is in [milestones/v2.1-REQUIREMENTS.md](milestones/v2.1-REQUIREMENTS.md) and [milestones/v2.1-ROADMAP.md](milestones/v2.1-ROADMAP.md).
 
 ### Out of Scope
 
 - Multi-device (MIP-06) — catalogued, deferred to v2 (MDEV-01); orthogonal to single-device wire interop
 - Push notifications (MIP-05) — deferred to v2 (PUSH-01); groups must work with zero push
-- Implementing the blossom-image (0x8002) codec — Rust reference omits it; documented as unsupported instead
 - QUIC transport runtime / broker (agent text streams) — experimental; the 0x8006 durable policy codec is done, the data plane is deliberately absent
 - App / tooling crates (marmot-app, cli, forensics, uniffi, concrete storage backends) — not library scope
-- App-message NIP-40 expiry semantics — cataloged as deferred by the catchup review
+- General app-message expiry semantics beyond the selected retention-tag follow-up — deferred
 - Legacy `0xf2f1` proof compatibility (reading or joining existing Legacy-profile groups) — v2.0 is a clean cut to the adopted spec, which forbids a v1/legacy fallback
 - Published KeyPackage rotation/refresh to retire legacy KeyPackages — not taken on in v2.0; apps republish
 
@@ -107,7 +107,7 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
 
 - Both upstreams are vendored under `refs/` and are the source of truth for wire format:
   **`refs/marmot/`** (spec, topic-organized; MIP numbering deprecated) and **`refs/mdk/`**
-  (Rust "Marmot Development Kit", currently `accda242`). A standing rule checks both for upstream
+  (Rust "Marmot Development Kit", Phase 13 pin `076841eb`). A standing rule checks both for upstream
   changes at the start of every phase.
 - `ts-mls` is a local workspace package and the MLS engine the library builds on.
 - Codebase: ~72k lines of TypeScript under `src/`. v1.0 touched 124 `src/` files (+20.7k / −0.75k,
@@ -115,9 +115,10 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
 - Known technical debt:
   - `maxRewindCommits: Infinity` remains memory-unbounded until `GroupHistoryTree` pruning lands (v1.0)
   - v2.0 items listed in the archived v2.0 audit (see [release follow-ups](RELEASE-FOLLOWUPS.md)) (untested Phase 8 review fixes, Phase 10
-    foundingAdd TOCTOU and retry reentrancy, Phase 11 export-guard gaps, `0x8002`/`0x8008`/`0x800b`
+    foundingAdd TOCTOU and retry reentrancy, Phase 11 export-guard gaps, `0x8008`/`0x800b`
     accepted as opaque — looser than MDK)
-  - Accepted/deferred review items are recorded in the phase `deferred-items.md` files
+  - v2.1 retains 246 expanded test-source diagnostics, 54 TypeDoc warnings and optional WINDOWS ledger repair; the user acknowledged these for later work.
+  - Accepted/deferred review items are retained in [release follow-ups](RELEASE-FOLLOWUPS.md)
   - (Resolved in v2.0: stale `MIP-NN` citations in `src/` rewritten to topic spec paths)
 - `SPEC_GAP_REVIEW.md` (repo root) is an older backlog snapshot referenced by example READMEs; keep the path.
 
@@ -137,22 +138,29 @@ Not yet defined — run `/gsd-new-milestone`. Candidates:
 
 ## Key Decisions
 
-| Decision | Rationale | Outcome |
-| --- | --- | --- |
-| v1.0 repurposed as "catchup" | The prior v1.0 never shipped and the upstream split moved far ahead, so its phases were shelved to backlog (999.3–999.6) | ✓ Good — shipped a verifiable resync |
-| Milestone = resync to post-split marmot spec + MDK Rust | Byte-for-byte parity with the current Rust reference is a verifiable finish line | ✓ Good |
-| Review refs first, then close interop-breakers first | Breakers (proof v2, inbound trust, wire boundary) had to land before additive parity | ✓ Good |
-| Proof v2 isolated as Phase 1 | Touches identity/credential machinery; headline breaker | ✓ Good — closed in 2 plans |
-| Multi-device, push, QUIC data plane, app/tooling deferred | Orthogonal to single-device wire interop | ✓ Good — still valid |
-| Insert Phase 03.1 instead of a fourth self-graded review-fix pass | Three review rounds each found blockers in the previous fixes | ✓ Good — 15 planned closures verified |
-| Port MDK `OwnCommitConvergenceStamp` rather than patch CR-08/CR-11 incrementally | The Rust reference already had a structural solution to the defect class | ✓ Good — closed in Phase 4 |
-| Standing per-phase `refs/` upstream check | 2026-08-06 sweep found submodules 4 and 193 commits behind | ✓ Good — surfaced lifecycle-v1 scope (Phase 04.1) |
-| Implement `marmot.group.lifecycle.v1` disbanding in v1.0 (Phase 04.1) | New spec scope sharing the convergence-pass machinery | ✓ Good |
-| QA-02 evidence as immutable dossiers bound to one tested source SHA | Byte-exact claims must be reproducible and machine-validated | ✓ Good |
-| v2.0 clean cut to proof component `0x8009` (no legacy `0xf2f1` profile) | Adopted spec forbids a v1/legacy fallback; diverges deliberately from MDK's temporary explicit-legacy path | ✓ Good — shipped; out-of-profile groups refuse traffic |
-| Centralize the `0x8009` profile check in the shared `validateCommitLegality` adapter (Phase 8) | Defend against the recurring seam-asymmetry (mdk#707) defect class | ✓ Good — 14-test seam-parity matrix |
-| Founding create merges the Add locally and sends Welcomes only (MDK `FoundingGroupCreated`) | No founding commit to race on; group is `Stable` immediately | ✓ Good — relay-less invitees fail closed (D-09 reversed) |
-| `MarmotAuthorizationProof` as a shared `src/core` primitive | Multi-device join authorization and push owner proofs reuse the same 104-byte envelope | ✓ Good — `0x8009` built on it unchanged; ready for MDEV/PUSH |
+| Decision                                                                                       | Rationale                                                                                                                | Outcome                                                      |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
+| v1.0 repurposed as "catchup"                                                                   | The prior v1.0 never shipped and the upstream split moved far ahead, so its phases were shelved to backlog (999.3–999.6) | ✓ Good — shipped a verifiable resync                         |
+| Milestone = resync to post-split marmot spec + MDK Rust                                        | Byte-for-byte parity with the current Rust reference is a verifiable finish line                                         | ✓ Good                                                       |
+| Review refs first, then close interop-breakers first                                           | Breakers (proof v2, inbound trust, wire boundary) had to land before additive parity                                     | ✓ Good                                                       |
+| Proof v2 isolated as Phase 1                                                                   | Touches identity/credential machinery; headline breaker                                                                  | ✓ Good — closed in 2 plans                                   |
+| Multi-device, push, QUIC data plane, app/tooling deferred                                      | Orthogonal to single-device wire interop                                                                                 | ✓ Good — still valid                                         |
+| Insert Phase 03.1 instead of a fourth self-graded review-fix pass                              | Three review rounds each found blockers in the previous fixes                                                            | ✓ Good — 15 planned closures verified                        |
+| Port MDK `OwnCommitConvergenceStamp` rather than patch CR-08/CR-11 incrementally               | The Rust reference already had a structural solution to the defect class                                                 | ✓ Good — closed in Phase 4                                   |
+| Standing per-phase `refs/` upstream check                                                      | 2026-08-06 sweep found submodules 4 and 193 commits behind                                                               | ✓ Good — surfaced lifecycle-v1 scope (Phase 04.1)            |
+| Implement `marmot.group.lifecycle.v1` disbanding in v1.0 (Phase 04.1)                          | New spec scope sharing the convergence-pass machinery                                                                    | ✓ Good                                                       |
+| QA-02 evidence as immutable dossiers bound to one tested source SHA                            | Byte-exact claims must be reproducible and machine-validated                                                             | ✓ Good                                                       |
+| v2.0 clean cut to proof component `0x8009` (no legacy `0xf2f1` profile)                        | Adopted spec forbids a v1/legacy fallback; diverges deliberately from MDK's temporary explicit-legacy path               | ✓ Good — shipped; out-of-profile groups refuse traffic       |
+| Centralize the `0x8009` profile check in the shared `validateCommitLegality` adapter (Phase 8) | Defend against the recurring seam-asymmetry (mdk#707) defect class                                                       | ✓ Good — 14-test seam-parity matrix                          |
+| Founding create merges the Add locally and sends Welcomes only (MDK `FoundingGroupCreated`)    | No founding commit to race on; group is `Stable` immediately                                                             | ✓ Good — relay-less invitees fail closed (D-09 reversed)     |
+| `MarmotAuthorizationProof` as a shared `src/core` primitive                                    | Multi-device join authorization and push owner proofs reuse the same 104-byte envelope                                   | ✓ Good — `0x8009` built on it unchanged; ready for MDEV/PUSH |
+
+| Durable invalidation outbox and session shutdown fence (Phase 12) | Preserve every history retraction across crashes and prevent stale handles from recreating destroyed state | ✓ Good — independent review and lifecycle race tests passed |
+| Snapshot immutable signed retention envelopes (Phase 12) | Retries must preserve source-epoch expiry and event bytes | ✓ Good — byte-identical retry tests |
+
+| Strict optional/required image metadata validation before Welcome adoption | Newly supported components must join the complete tentative-state validator | ✓ Good — real signed malformed and valid Welcome matrix |
+| Per-reader plaintext ownership and image cancellation through actual preparation/publication | Cache eviction and independent service closure must not corrupt outputs or publish cancelled intents | ✓ Good — independently reproduced race regressions |
+| Explicit image transport profiles and complete canonical snapshot identity | Asset availability stays separate from valid group state; policy cannot be bypassed by sharing | ✓ Good — bounded HTTP/profile/cache tests |
 
 ## Evolution
 
@@ -175,4 +183,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-_Last updated: 2026-10-05 after v2.0 milestone_
+_Last updated: 2026-10-09 after v2.1 milestone completion_

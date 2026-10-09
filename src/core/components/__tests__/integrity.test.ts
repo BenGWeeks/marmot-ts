@@ -1255,7 +1255,7 @@ describe("validateCommitLegality", () => {
     } as unknown as ClientState;
   }
 
-  it("derives requiredIds from the PARENT state, not the resulting one (Pitfall 2 regression guard)", () => {
+  it("rejects requiring and removing a component in the same resulting epoch", () => {
     // Parent: app_components only requires GROUP_PROFILE_COMPONENT_ID (plus
     // the current-profile 0x8009 requirement, so this fixture stays inside
     // the D-01a profile check added in this plan); the retention component
@@ -1266,6 +1266,7 @@ describe("validateCommitLegality", () => {
           GROUP_PROFILE_COMPONENT_ID,
           ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
         ]),
+        componentEntry(GROUP_PROFILE_COMPONENT_ID, new Uint8Array([1])),
         componentEntry(
           GROUP_MESSAGE_RETENTION_COMPONENT_ID,
           new Uint8Array([1]),
@@ -1275,9 +1276,8 @@ describe("validateCommitLegality", () => {
     );
 
     // Resulting: this SAME commit adds retention to the required list AND
-    // drops its own component entry (backed by an explicit Remove op). If
-    // requiredIds were (wrongly) derived from the resulting state, retention
-    // would already be "required" and rule 2 would reject this drop.
+    // drops its own component entry (backed by an explicit Remove op). The
+    // resulting required list forbids that contradictory final state.
     const resultingState = fakeClientState(
       dict(
         appComponentsEntry([
@@ -1285,6 +1285,7 @@ describe("validateCommitLegality", () => {
           ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
           GROUP_MESSAGE_RETENTION_COMPONENT_ID,
         ]),
+        componentEntry(GROUP_PROFILE_COMPONENT_ID, new Uint8Array([1])),
       ),
       [ADMIN_PUBKEY],
     );
@@ -1301,13 +1302,15 @@ describe("validateCommitLegality", () => {
       removeOp(GROUP_MESSAGE_RETENTION_COMPONENT_ID),
     ];
 
-    expectLegal(
-      validateCommitLegality({
-        parentState,
-        resultingState,
-        proposals,
-      }),
-    );
+    expect(
+      violationOf(
+        validateCommitLegality({
+          parentState,
+          resultingState,
+          proposals,
+        }),
+      )?.detail,
+    ).toBe("drops required app component 0x8005");
   });
 
   it("returns the integrity violation before the coupling violation when a commit violates both", () => {
@@ -1550,10 +1553,8 @@ describe("validateCommitLegality", () => {
       );
     }).not.toThrow();
     expect(violation!).toEqual({
-      reason: "account-identity-proof",
-      detail:
-        "resulting GroupContext is outside the current account identity proof profile (invalid-dictionary)",
-      proofReason: "invalid-dictionary",
+      reason: "component-integrity",
+      detail: "resulting app_components component did not decode",
     });
   });
 });

@@ -28,6 +28,7 @@ export default defineConfig({
           { text: "Overview", link: "/client/" },
           { text: "Client", link: "/client/marmot-client" },
           { text: "Groups", link: "/client/marmot-group" },
+          { text: "Group images", link: "/client/group-images" },
           { text: "Proposals", link: "/client/proposals" },
           { text: "History", link: "/client/history" },
           { text: "Fork History", link: "/client/fork-history" },

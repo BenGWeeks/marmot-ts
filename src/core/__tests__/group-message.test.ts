@@ -12,6 +12,7 @@ import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 
 import {
   createEncryptedGroupEventContent,
+  createGroupEvent,
   decryptGroupMessageEvent,
 } from "../group-message.js";
 import { createCredential } from "../credential.js";
@@ -37,13 +38,52 @@ async function createTestState(account: PrivateKeyAccount<any>) {
     keyPackage,
     ciphersuite,
     "Test Group",
-    { adminPubkeys: [pubkey], relays: [] },
+    { adminPubkeys: [pubkey], relays: ["wss://relay.test"] },
   );
 
   return { clientState, ciphersuite };
 }
 
 describe("group message encryption (transports/nostr.md)", () => {
+  it("signs the exact expiration tag and never infers it for encrypted-byte callers", async () => {
+    const { clientState: state, ciphersuite } = await createTestState(
+      testAccount(6),
+    );
+    const { message } = await createApplicationMessage({
+      context: {
+        cipherSuite: ciphersuite,
+        authService: unsafeTestingAuthenticationService,
+      },
+      state,
+      message: new TextEncoder().encode("opaque bytes"),
+    });
+    const metadata = { expiration: (1n << 64n) - 1n };
+    const event = await createGroupEvent({
+      state,
+      message,
+      ciphersuite,
+      ...{ metadata },
+    });
+    expect(event.tags.filter((tag) => tag[0] === "expiration")).toEqual([
+      ["expiration", "18446744073709551615"],
+    ]);
+    const { getEventHash, verifyEvent } =
+      await import("applesauce-core/helpers/event");
+    expect(event.id).toBe(getEventHash(event));
+    expect(verifyEvent(event)).toBe(true);
+    const bare = await createGroupEvent({ state, message, ciphersuite });
+    expect(bare.tags.filter((tag) => tag[0] === "expiration")).toEqual([]);
+    for (const expiration of [-1n, 1n << 64n]) {
+      const invalid = await createGroupEvent({
+        state,
+        message,
+        ciphersuite,
+        ...{ metadata: { expiration } },
+      });
+      expect(invalid.tags.filter((tag) => tag[0] === "expiration")).toEqual([]);
+    }
+  });
+
   it("encrypts and decrypts with the kind-445 ChaCha20-Poly1305 envelope", async () => {
     const { clientState, ciphersuite } = await createTestState(testAccount(6));
 

@@ -19,18 +19,20 @@ import { KEY_PACKAGE_APP_COMPONENTS_TAG } from "../protocol.js";
 /**
  * The pinned MDK tag fixture (`mdk_sha` `798a3e07`) predates the spec rule
  * that the `app_components` tag MUST include `0x8009`
- * (`refs/marmot/transports/nostr.md`). Production now advertises it (via
- * `SUPPORTED_APP_COMPONENT_IDS`), inserted immediately before `0x800c`.
+ * (`refs/marmot/transports/nostr.md`) and the implemented `0x8002` image
+ * support (`refs/marmot/app-components/group-blossom-image-v1.md`). Production
+ * advertises both, in canonical numeric order.
  * This helper projects the raw Rust fixture forward to what production is
  * expected to emit, without touching the pinned fixture bytes/hash.
  */
-function withAccountIdentityProofTag(tags: string[][]): string[][] {
+function withCurrentImageAndProofTags(tags: string[][]): string[][] {
   return tags.map((tag) => {
     if (tag[0] !== KEY_PACKAGE_APP_COMPONENTS_TAG) return tag;
     const idx = tag.indexOf("0x800c");
     if (idx === -1) return tag;
     const withProof = [...tag];
     withProof.splice(idx, 0, "0x8009");
+    withProof.splice(withProof.indexOf("0x8003"), 0, "0x8002");
     return withProof;
   });
 }
@@ -64,16 +66,15 @@ async function expectProductionTags(expectedTags: string[][]): Promise<void> {
 describe("MDK kind-30443 tag parity", () => {
   const rust = tagFixture as TagFixture;
 
-  it("matches the Rust-produced canonical tag array and order, plus 0x8009 (refs/marmot/transports/nostr.md)", async () => {
+  it("matches the Rust-produced canonical tag array and order, plus current 0x8002/0x8009 support (refs/marmot/transports/nostr.md)", async () => {
     expect(rust.mdk_sha).toBe("798a3e07ede494d98c2ecf590c6e838a8c1dfcfe");
     expect(
       bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(rust.tags)))),
     ).toBe(rust.tags_sha256);
 
-    // The pinned fixture predates the 0x8009 tag rule; production tags equal
-    // the fixture tags with "0x8009" inserted into app_components immediately
-    // before "0x800c" (PITFALLS 14).
-    await expectProductionTags(withAccountIdentityProofTag(rust.tags));
+    // Preserve the immutable Rust oracle and project only the approved
+    // current proof and implemented image support additions (PITFALLS 14).
+    await expectProductionTags(withCurrentImageAndProofTags(rust.tags));
   });
 
   it("the Rust fixture's mls_proposals tag is an exact match for its KeyPackage", () => {
@@ -83,7 +84,7 @@ describe("MDK kind-30443 tag parity", () => {
   });
 
   it("negative control rejects a mutated Rust oracle through production parity", async () => {
-    const mutated = withAccountIdentityProofTag(
+    const mutated = withCurrentImageAndProofTags(
       rust.tags.map((tag) => [...tag]),
     );
     mutated[0][1] = "ff".repeat(32);

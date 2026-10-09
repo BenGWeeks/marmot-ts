@@ -145,6 +145,20 @@ function loadOrCreateDeviceId(path: string, ephemeral: boolean): string {
   return id;
 }
 
+/** Publication slots are random 32-byte lowercase hex, persisted across restarts. */
+function loadOrCreateKeyPackageSlot(path: string, ephemeral: boolean): string {
+  if (!ephemeral && existsSync(path)) {
+    const slot = readFileSync(path, "utf8").trim();
+    if (/^[0-9a-f]{64}$/.test(slot)) return slot;
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const slot = Array.from(bytes, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  if (!ephemeral) writeFileSync(path, slot);
+  return slot;
+}
+
 /**
  * Open the shared per-account SQLite database. WAL mode + `synchronous=NORMAL`
  * gives fast, crash-safe single-process writes for a local demo store.
@@ -183,15 +197,18 @@ export async function createController(
   mkdirSync(dataDir, { recursive: true });
 
   // A stable per-device identifier, persisted alongside the identity so the
-  // same machine reuses it across restarts. Used as the replaceable KeyPackage
-  // `d` tag (so two devices under the same account don't clobber each other on
-  // relays) and as the audit `engine_id` input. Ephemeral mode generates a
+  // same machine reuses it across restarts. Used as the
+  // audit `engine_id` input. Publication uses its own conformant slot below.
+  // Ephemeral mode generates a
   // fresh one each run since nothing is persisted.
   const deviceId = loadOrCreateDeviceId(
     join(dataDir, "device-id"),
     opts.ephemeral,
   );
-  const clientId = `marmot-opentui-${deviceId.slice(0, 8)}`;
+  const clientId = loadOrCreateKeyPackageSlot(
+    join(dataDir, "key-package-slot"),
+    opts.ephemeral,
+  );
 
   // One SQLite connection holds every key-value store for this account (groups,
   // KeyPackages, invites, messages) as separate tables. Null in ephemeral mode,

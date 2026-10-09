@@ -21,7 +21,19 @@ import {
   createSimpleGroup,
   generateKeyPackage,
   validateKeyPackageAccountIdentityProof,
+  buildGroupImageAad,
+  canonicalizeGroupImageMediaType,
+  encodeGroupBlossomImage,
+  decodeGroupBlossomImage,
+  encryptGroupImage,
+  decryptGroupImage,
+  getGroupImageSource,
+  getGroupImageSnapshotIdentity,
 } from "@internet-privacy/marmot-ts/core";
+import {
+  GroupImageService,
+  fetchGroupImageTransport,
+} from "@internet-privacy/marmot-ts/client";
 import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, hexToBytes, utf8ToBytes } from "@noble/hashes/utils.js";
@@ -106,6 +118,74 @@ assert(
   encoded instanceof Uint8Array && encoded.length > 0,
   "encode(groupContextEncoder, groupContext) did not return a non-empty Uint8Array",
 );
+
+assert(
+  marmotTs.GroupImageService === GroupImageService,
+  "root/client image service mismatch",
+);
+assert(
+  marmotTs.fetchGroupImageTransport === fetchGroupImageTransport,
+  "root/client image transport mismatch",
+);
+assert(
+  marmotTs.encodeGroupBlossomImage === encodeGroupBlossomImage,
+  "root/core image codec mismatch",
+);
+const emptyImage = encodeGroupBlossomImage({ kind: "empty" });
+assert(
+  bytesToHex(emptyImage) === "0000000000",
+  "image clear must have five empty field prefixes",
+);
+assert(
+  decodeGroupBlossomImage(emptyImage).kind === "empty",
+  "empty image codec roundtrip",
+);
+assert(
+  canonicalizeGroupImageMediaType("IMAGE/PNG") === "image/png",
+  "image MIME canonicalization",
+);
+assert(
+  bytesToHex(buildGroupImageAad("image/png")) ===
+    bytesToHex(utf8ToBytes("marmot-group-image-v1\0image/png")),
+  "image AAD wire bytes",
+);
+assert(
+  getGroupImageSource(clientState).kind === "none",
+  "fresh group's canonical source should be none",
+);
+const plaintext = Uint8Array.of(0, 1, 2, 255);
+const image = encryptGroupImage(plaintext, "image/png");
+const imageMetadata = decodeGroupBlossomImage(
+  encodeGroupBlossomImage(image.metadata),
+);
+assert(imageMetadata.kind === "present", "present image codec roundtrip");
+assert(
+  bytesToHex(decryptGroupImage(image.ciphertext, imageMetadata)) ===
+    bytesToHex(plaintext),
+  "image crypto roundtrip",
+);
+assert(
+  getGroupImageSnapshotIdentity(imageMetadata) ===
+    getGroupImageSnapshotIdentity(image.metadata),
+  "complete image snapshot survives wire encoding",
+);
+const service = new GroupImageService({
+  getState: () => clientState,
+  isClosed: () => false,
+});
+assert(
+  service.source().kind === "none",
+  "packed image service canonical source",
+);
+const noImage = await service.read({
+  endpoints: ["https://images.example.com"],
+});
+assert(
+  noImage.kind === "unavailable" && noImage.reason === "no-image",
+  "none must return typed unavailable without HTTP",
+);
+service.close();
+assert(service.closedSignal.aborted, "packed service close signal");
 
 const runtime = globalThis.Deno
   ? "Deno"

@@ -31,6 +31,7 @@ import {
 } from "ts-mls";
 
 import { marmotAuthService } from "../core/auth-service.js";
+import { deserializeApplicationData } from "../core/application-rumor.js";
 import { getMarmotGroupView } from "../core/client-state.js";
 import {
   deserializeClientState,
@@ -44,6 +45,7 @@ import {
   getAdminPolicy,
   getAppComponents,
   getGroupLifecycle,
+  getMessageRetention,
 } from "../core/components/dictionary.js";
 import {
   type CommitIntegrityViolation,
@@ -106,6 +108,10 @@ import {
   type AuditTransportWireEnvelope,
 } from "../audit/index.js";
 import { framedContentType } from "./wire-format.js";
+import {
+  validateGroupImageLegality,
+  validateGroupImageProposals,
+} from "../core/components/image-validation.js";
 import { logger } from "../utils/debug.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
 import {
@@ -153,6 +159,7 @@ import type {
   IngestResult,
   PendingState,
   ProposalContext,
+  CommitProposalInputs,
   SendIntent,
   SendResult,
 } from "./types.js";
@@ -273,8 +280,9 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
   /**
    * The signed convergence policy governing branch selection and the rollback
    * horizon (`maxRewindCommits`). Defaults to {@link DEFAULT_CONVERGENCE_POLICY}.
-   * Set `maxRewindCommits` to `Infinity` to never expire old forks (the full
-   * history tree retains everything regardless). Validated on construction.
+   * Keep that finite default for production. `Infinity` is an explicit
+   * debugging/forensics choice that can retain unbounded fork evidence.
+   * The horizon does not guarantee full-history tree pruning. Validated on construction.
    */
   convergencePolicy?: import("../core/convergence.js").CompatibleConvergencePolicy;
   /**
@@ -636,6 +644,54 @@ export class MarmotGroupEngine<TEnvelope> {
     });
   }
 
+  exportDeliveredPayloads() {
+    return this.#delivered.exportEntries();
+  }
+
+  /** Permanently close plaintext delivery bookkeeping on local destruction. */
+  destroyDeliveredPayloads(): void {
+    this.#delivered.destroy();
+  }
+
+  /** Rewind obligations awaiting the transport owner's durable handoff. */
+  exportInvalidatedPayloads() {
+    return this.#delivered.exportInvalidated();
+  }
+
+  acknowledgeInvalidatedPayloads(
+    entries: Iterable<
+      import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>
+    >,
+  ): void {
+    this.#delivered.acknowledgeInvalidated(entries);
+  }
+
+  importDeliveredPayloads(
+    entries: import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>[],
+  ): void {
+    this.#delivered.importEntries(entries);
+    const horizon = this.#ledgerHorizon();
+    if (horizon !== undefined) this.#delivered.pruneBelow(horizon);
+  }
+
+  #deliveryAttribution(
+    stateTag: string,
+    envelope: TEnvelope,
+    payload: Uint8Array,
+  ) {
+    let rumorId: string | undefined;
+    try {
+      rumorId = deserializeApplicationData(payload).id.toLowerCase();
+    } catch {
+      /* opaque engine callers have no strict rumor identity */
+    }
+    return {
+      commitDigest: this.history.node(stateTag)?.edge?.commitDigest,
+      transportId: this.peeler.idOf(envelope),
+      rumorId,
+    };
+  }
+
   /** Snapshot of the active immutable pass, exposed for scheduler diagnostics. */
   get convergencePass(): ConvergencePassState | undefined {
     return this.#convergencePass && { ...this.#convergencePass };
@@ -911,8 +967,13 @@ export class MarmotGroupEngine<TEnvelope> {
   }
 
   /** Executes a local send intent and returns the wrapped transport envelope. */
-  async send(intent: SendIntent): Promise<SendResult<TEnvelope>> {
+  async send(
+    intent: SendIntent,
+    /** Ephemeral caller fence; checked after fallible commit preparation, never stored in state. */
+    assertPreparation?: (proposals: readonly Proposal[]) => void,
+  ): Promise<SendResult<TEnvelope>> {
     await this.#disbandHydrated;
+    assertPreparation?.([]);
     if (this.#disbandRequest?.status === "pending") throw new DisbandingError();
     // Refused before the audit `send_entry` emit, so a refused intent leaves
     // no trace of having been attempted.
@@ -920,7 +981,7 @@ export class MarmotGroupEngine<TEnvelope> {
     const intentKind = auditSendIntentKind(intent);
     this.#emitAudit({ type: "send_entry", intent_kind: intentKind });
     try {
-      const result = await this.#sendInner(intent);
+      const result = await this.#sendInner(intent, assertPreparation);
       this.#emitAudit({
         type: "send_outcome",
         intent_kind: intentKind,
@@ -957,7 +1018,10 @@ export class MarmotGroupEngine<TEnvelope> {
     }
   }
 
-  async #sendInner(intent: SendIntent): Promise<SendResult<TEnvelope>> {
+  async #sendInner(
+    intent: SendIntent,
+    assertPreparation?: (proposals: readonly Proposal[]) => void,
+  ): Promise<SendResult<TEnvelope>> {
     // CR-04: every outbound intent funnels through here — `send()`,
     // `requestDisband()` and `enableGroupDisbanding()` alike — so this is the
     // one place that can honestly claim to gate them all. `send()` also calls
@@ -966,19 +1030,42 @@ export class MarmotGroupEngine<TEnvelope> {
     this.#assertOutboundIntentAllowed();
     switch (intent.kind) {
       case "applicationMessage": {
+        const sourceState = this.state;
+        let expiration: bigint | undefined;
+        try {
+          const { created_at } = deserializeApplicationData(intent.payload);
+          const retention = getMessageRetention(
+            sourceState.groupContext.extensions,
+          );
+          const u64Max = (1n << 64n) - 1n;
+          if (
+            Number.isSafeInteger(created_at) &&
+            created_at >= 0 &&
+            retention !== undefined &&
+            retention > 0n &&
+            retention <= u64Max
+          ) {
+            const sum = BigInt(created_at) + retention;
+            if (sum <= u64Max) expiration = sum;
+          }
+        } catch {
+          // Expiry is advisory: opaque/invalid payloads or policy cannot supply
+          // a hint, but must not fail an otherwise valid MLS send.
+        }
         const { newState, message } = await createApplicationMessage({
           context: {
             cipherSuite: this.ciphersuite,
             authService: marmotAuthService,
             externalPsks: {},
           },
-          state: this.state,
+          state: sourceState,
           message: intent.payload,
         });
 
         const envelope = await this.peeler.wrapGroupMessage(
           message,
-          this.state,
+          sourceState,
+          { expiration },
         );
         this.#sentContentIds.add(contentDedupId(message));
         this.#setState(newState);
@@ -988,6 +1075,11 @@ export class MarmotGroupEngine<TEnvelope> {
           envelope,
           message,
           payload: intent.payload,
+          ...this.#deliveryAttribution(
+            bytesToHex(newState.confirmationTag),
+            envelope,
+            intent.payload,
+          ),
         });
         const horizon = this.#ledgerHorizon();
         if (horizon !== undefined) this.#delivered.pruneBelow(horizon);
@@ -1052,6 +1144,19 @@ export class MarmotGroupEngine<TEnvelope> {
         );
         if (proposalViolation) throw new CommitLegalityError(proposalViolation);
 
+        const imageOutcome = validateGroupImageLegality({
+          parentState: this.state,
+          proposals: [intent.proposal],
+          committerLeafIndex: Number(this.state.privatePath.leafIndex),
+        });
+        if (imageOutcome.kind === "violation")
+          throw new CommitLegalityError(imageOutcome.violation);
+        if (imageOutcome.kind === "undecidable")
+          throw new CommitLegalityError({
+            reason: "component-integrity",
+            detail: imageOutcome.detail,
+          });
+
         const { message, newState } = await createProposal({
           context: {
             cipherSuite: this.ciphersuite,
@@ -1094,16 +1199,18 @@ export class MarmotGroupEngine<TEnvelope> {
           groupData,
         };
 
-        const newProposals: Proposal[] = [];
-        if (intent.extraProposals && intent.extraProposals.length > 0) {
-          for (const item of intent.extraProposals.flat()) {
-            if (typeof item === "function") {
-              newProposals.push(await item(context));
-            } else {
-              newProposals.push(item);
-            }
-          }
-        }
+        const newProposals = await this.#resolveCommitProposals(
+          intent.extraProposals ?? [],
+          context,
+        );
+
+        const guardedProposals = [
+          ...Object.values(this.state.unappliedProposals).map(
+            ({ proposal }) => proposal,
+          ),
+          ...newProposals,
+        ];
+        assertPreparation?.(guardedProposals);
 
         if (intent.proposalRefs) {
           for (const ref of intent.proposalRefs) {
@@ -1149,6 +1256,7 @@ export class MarmotGroupEngine<TEnvelope> {
           state: prepared.commitState,
           ...commitOptions,
         });
+        assertPreparation?.(guardedProposals);
 
         // D-01/D-02: validate the staged commit before it is wrapped or
         // published, and before the lifecycle transitions to PendingPublish.
@@ -1163,6 +1271,7 @@ export class MarmotGroupEngine<TEnvelope> {
         );
 
         const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+        assertPreparation?.(guardedProposals);
 
         this.#transitionLifecycle(
           groupLifecycleStates.pendingPublish,
@@ -1253,14 +1362,10 @@ export class MarmotGroupEngine<TEnvelope> {
           groupData,
         };
 
-        const newProposals: Proposal[] = [];
-        for (const item of intent.extraProposals.flat()) {
-          if (typeof item === "function") {
-            newProposals.push(await item(context));
-          } else {
-            newProposals.push(item);
-          }
-        }
+        const newProposals = await this.#resolveCommitProposals(
+          intent.extraProposals,
+          context,
+        );
 
         // No `proposalRefs` handling here: the intent has no such field, and
         // this is now enforced above -- the no-unapplied-proposals check
@@ -1472,6 +1577,68 @@ export class MarmotGroupEngine<TEnvelope> {
    * `extraProposals`. This preserves proposal identity and prevents a selected
    * reference from being counted a second time as a by-value proposal.
    */
+  /** Resolve all inputs before legality checks or staging any commit output. */
+  async #resolveCommitProposals(
+    inputs: CommitProposalInputs,
+    context: ProposalContext,
+  ): Promise<Proposal[]> {
+    const proposals: Proposal[] = [];
+    for (const entry of inputs) {
+      const items = Array.isArray(entry) ? entry : [entry];
+      if (items.length === 0) throw new Error("Empty proposal input array");
+      for (const item of items) {
+        const result = typeof item === "function" ? await item(context) : item;
+        const resolved = Array.isArray(result) ? result : [result];
+        if (resolved.length === 0)
+          throw new Error("Empty proposal builder result");
+        for (const proposal of resolved) {
+          if (
+            !proposal ||
+            Array.isArray(proposal) ||
+            typeof proposal !== "object" ||
+            !Number.isInteger(proposal.proposalType) ||
+            proposal.proposalType < 0 ||
+            proposal.proposalType > 0xffff
+          ) {
+            throw new Error("Malformed proposal input or builder result");
+          }
+          const payloadKeys: Record<number, string> = {
+            [defaultProposalTypes.add]: "add",
+            [defaultProposalTypes.update]: "update",
+            [defaultProposalTypes.remove]: "remove",
+            [defaultProposalTypes.psk]: "psk",
+            [defaultProposalTypes.reinit]: "reinit",
+            [defaultProposalTypes.external_init]: "externalInit",
+            [defaultProposalTypes.group_context_extensions]:
+              "groupContextExtensions",
+            [appDataUpdateProposalType]: "appDataUpdate",
+          };
+          const payloadKey = payloadKeys[proposal.proposalType];
+          if (payloadKey) {
+            const payload: unknown = Reflect.get(proposal, payloadKey);
+            if (
+              !payload ||
+              typeof payload !== "object" ||
+              Array.isArray(payload)
+            ) {
+              throw new Error("Malformed proposal payload");
+            }
+          } else if (
+            !isSelfRemoveProposal(proposal) &&
+            !(
+              "proposalData" in proposal &&
+              proposal.proposalData instanceof Uint8Array
+            )
+          ) {
+            throw new Error("Malformed custom proposal payload");
+          }
+          proposals.push(proposal);
+        }
+      }
+    }
+    return proposals;
+  }
+
   #prepareOutboundCommitProposals(
     state: ClientState,
     adminPubkeys: readonly string[],
@@ -1493,6 +1660,22 @@ export class MarmotGroupEngine<TEnvelope> {
     const actorPubkey = getCredentialPubkey(
       getCredentialFromLeafIndex(state.ratchetTree, actorLeaf),
     );
+
+    const imageOutcome = validateGroupImageLegality({
+      parentState: state,
+      proposals: [
+        ...Object.values(state.unappliedProposals),
+        ...byValueProposals,
+      ],
+      committerLeafIndex: Number(actorLeaf),
+    });
+    if (imageOutcome.kind === "violation")
+      throw new CommitLegalityError(imageOutcome.violation);
+    if (imageOutcome.kind === "undecidable")
+      throw new CommitLegalityError({
+        reason: "component-integrity",
+        detail: imageOutcome.detail,
+      });
 
     // WR-05/CR-02: `createCommit` bundles every unapplied proposal by
     // reference, so refusing the commit over a staged inadmissible proposal
@@ -2883,7 +3066,14 @@ export class MarmotGroupEngine<TEnvelope> {
         message,
         payload,
       ) => {
-        this.#delivered.record({ epoch, stateTag, envelope, message, payload });
+        this.#delivered.record({
+          epoch,
+          stateTag,
+          envelope,
+          message,
+          payload,
+          ...this.#deliveryAttribution(stateTag, envelope, payload),
+        });
         const horizon = this.#ledgerHorizon();
         if (horizon !== undefined) this.#delivered.pruneBelow(horizon);
       },
@@ -3275,12 +3465,24 @@ export class MarmotGroupEngine<TEnvelope> {
       notifications: chainNotifications,
       withdrawnNotifications,
       invalidated: invalidated.map(
-        ({ envelope, message, payload, stateTag, epoch }) => ({
+        ({
+          envelope,
+          message,
+          payload,
+          stateTag,
+          epoch,
+          commitDigest,
+          transportId,
+          rumorId,
+        }) => ({
           envelope,
           message,
           payload,
           tag: stateTag,
           epoch,
+          commitDigest,
+          transportId,
+          rumorId,
         }),
       ),
       selectedTerminal: resolution.selectedTerminal,
@@ -3417,6 +3619,9 @@ export class MarmotGroupEngine<TEnvelope> {
           payload: inv.payload,
           tag: inv.tag,
           epoch: inv.epoch,
+          commitDigest: inv.commitDigest,
+          transportId: inv.transportId,
+          rumorId: inv.rumorId,
         };
     }
   }
@@ -3704,7 +3909,12 @@ export class MarmotGroupEngine<TEnvelope> {
           [incoming.proposal],
           state.ratchetTree,
           ciphersuiteId,
-        )
+        ) ||
+        validateGroupImageProposals({
+          ratchetTree: state.ratchetTree,
+          adminPubkeys: [],
+          proposals: [incoming.proposal],
+        }).kind !== "legal"
           ? "reject"
           : "accept";
     }

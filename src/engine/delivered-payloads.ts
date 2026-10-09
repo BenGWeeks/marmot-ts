@@ -17,6 +17,12 @@ export interface DeliveredAppPayload<TEnvelope> {
   message: MlsMessage;
   /** The decrypted Marmot app payload bytes, so a retraction can name it. */
   payload: Uint8Array;
+  /** Actual edge that produced this delivery state; absent for roots. */
+  commitDigest?: Uint8Array;
+  /** Transport identity supplied by the peeler. */
+  transportId?: string;
+  /** Canonical inner identity, only when strict decoding succeeds. */
+  rumorId?: string;
 }
 
 /**
@@ -37,6 +43,8 @@ export interface DeliveredAppPayload<TEnvelope> {
  * `distributed_convergence.rs` (`AppMessageInvalidated`).
  */
 export class DeliveredPayloadLedger<TEnvelope> {
+  #closed = false;
+  readonly #invalidated = new Set<DeliveredAppPayload<TEnvelope>>();
   readonly #entries = new Map<
     string,
     Map<MlsMessage, DeliveredAppPayload<TEnvelope>>
@@ -62,14 +70,56 @@ export class DeliveredPayloadLedger<TEnvelope> {
     return envelopes;
   }
 
+  /** Snapshot bounded by the same tree-aware pruning horizon as live entries. */
+  exportEntries(): DeliveredAppPayload<TEnvelope>[] {
+    return [...this.#entries.values()].flatMap((branch) => [
+      ...branch.values(),
+    ]);
+  }
+
+  /** Complete rewind outbox, retained until the owner durably records it. */
+  exportInvalidated(): DeliveredAppPayload<TEnvelope>[] {
+    return [...this.#invalidated];
+  }
+
+  acknowledgeInvalidated(
+    entries: Iterable<DeliveredAppPayload<TEnvelope>>,
+  ): void {
+    for (const entry of entries) this.#invalidated.delete(entry);
+  }
+
+  /** Restore caller-validated evidence; codecs stay at the transport boundary. */
+  importEntries(entries: Iterable<DeliveredAppPayload<TEnvelope>>): void {
+    for (const entry of entries) {
+      if (
+        entry.transportId &&
+        this.exportEntries().some(
+          (existing) =>
+            existing.transportId === entry.transportId &&
+            existing.stateTag === entry.stateTag,
+        )
+      )
+        continue;
+      this.record(entry);
+    }
+  }
+
   /** Remembers a delivered application payload. */
   record(entry: DeliveredAppPayload<TEnvelope>): void {
+    if (this.#closed) return;
     let branch = this.#entries.get(entry.stateTag);
     if (!branch) {
       branch = new Map();
       this.#entries.set(entry.stateTag, branch);
     }
     if (!branch.has(entry.message)) branch.set(entry.message, entry);
+  }
+
+  /** Permanently discard plaintext on destruction, including late deliveries. */
+  destroy(): void {
+    this.#closed = true;
+    this.#entries.clear();
+    this.#invalidated.clear();
   }
 
   /**
@@ -88,6 +138,7 @@ export class DeliveredPayloadLedger<TEnvelope> {
       for (const [message, entry] of branch) {
         if (entry.epoch > forkEpoch && !canonicalTags.has(entry.stateTag)) {
           invalidated.push(entry);
+          this.#invalidated.add(entry);
           branch.delete(message);
         }
       }

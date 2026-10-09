@@ -18,8 +18,11 @@ import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
   APP_COMPONENTS_COMPONENT_ID,
   AppComponentId,
+  GROUP_LIFECYCLE_COMPONENT_ID,
+  SAFE_AAD_COMPONENT_ID,
 } from "./ids.js";
 import { bytesEqual } from "./bytes.js";
+import { validateGroupImageLegality } from "./image-validation.js";
 import {
   AccountIdentityProofError,
   getGroupProfileSupport,
@@ -169,17 +172,15 @@ export function collectAppDataUpdateOps(
  * Enforced rules, in order (mirrors the MDK rustdoc numbering):
  * 1. the `app_data_dictionary` extension itself may never be dropped if it was
  *    present before;
- * 2. the `app_components` id (`0x0001`) and every id in the CURRENT epoch's
+ * 2. structural nonremovable ids and every id in the RESULTING epoch's
  *    required-component-id list may never be dropped;
  * 3. every dictionary entry that changes relative to the current epoch —
  *    added, rewritten, or removed — must match one of this commit's own
  *    `AppDataUpdate` operations.
  *
- * @param args.requiredIds MUST be derived by the caller from the CURRENT
- * (pre-commit) extensions — see Pitfall 2 in 03-RESEARCH.md. Deriving this
- * from `resultingExtensions` would let a commit add an id to `app_components`
- * and thereby protect that same id in the same commit, which is the exact bug
- * class this validator exists to close.
+ * @param args.requiredIds The current required list, used only as a fallback
+ * for contexts without an app_components entry. The complete resulting list
+ * controls removal, permitting an atomic authorized unrequire-and-remove.
  *
  * Additionally, per account-identity-proof-v2.md "Lifecycle, authorization, and
  * removal" ("It is not GroupContext state and MUST NOT be created, replaced, or
@@ -251,15 +252,44 @@ export function validateAppComponentIntegrity(args: {
     };
   }
 
-  // Rule 2: the protected set (current required ids + 0x0001) may never be
-  // dropped.
-  const protectedIds = new Set<AppComponentId>(args.requiredIds);
-  protectedIds.add(APP_COMPONENTS_COMPONENT_ID);
+  let resultingRequired: readonly AppComponentId[] | undefined;
+  try {
+    resultingRequired = getAppComponents(args.resultingExtensions);
+  } catch {
+    return {
+      reason: "component-integrity",
+      detail: "resulting app_components component did not decode",
+    };
+  }
+  // Rule 2: resulting requirements govern optional removal, while structural
+  // ids remain nonremovable even when an AppDataUpdate unrequires them.
+  const structuralIds = [
+    APP_COMPONENTS_COMPONENT_ID,
+    SAFE_AAD_COMPONENT_ID,
+    GROUP_LIFECYCLE_COMPONENT_ID,
+  ];
+  if (
+    args.appDataUpdateOps.some(
+      (op) => op.data === undefined && structuralIds.includes(op.componentId),
+    )
+  )
+    return {
+      reason: "component-integrity",
+      detail: "AppDataUpdate removes a structural app component",
+    };
+  const protectedIds = new Set<AppComponentId>([
+    ...(resultingRequired ?? args.requiredIds),
+    ...structuralIds,
+  ]);
   for (const id of protectedIds) {
+    if (id === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID) continue;
     const currentlyPresent =
       current?.some((c) => c.componentId === id) ?? false;
     const stillPresent = resulting?.some((c) => c.componentId === id) ?? false;
-    if (currentlyPresent && !stillPresent) {
+    if (
+      !stillPresent &&
+      (currentlyPresent || resultingRequired?.includes(id))
+    ) {
       return {
         reason: "component-integrity",
         detail: `drops required app component 0x${id.toString(16)}`,
@@ -857,6 +887,9 @@ export function validateCommitLegality(args: {
   if (integrityViolation)
     return { kind: "violation", violation: integrityViolation };
 
+  const imageOutcome = validateGroupImageLegality(args);
+  if (imageOutcome.kind === "violation") return imageOutcome;
+
   const accountIdentityProofOutcome = validateCommitAccountIdentityProofs({
     parentState: args.parentState,
     resultingState: args.resultingState,
@@ -875,7 +908,9 @@ export function validateCommitLegality(args: {
   const undecidableDetail =
     accountIdentityProofOutcome.kind === "undecidable"
       ? accountIdentityProofOutcome.detail
-      : undefined;
+      : imageOutcome.kind === "undecidable"
+        ? imageOutcome.detail
+        : undefined;
 
   const disband: DisbandClassification = classifyDisbandCommit({
     parentState: args.parentState,

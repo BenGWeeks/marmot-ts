@@ -2,7 +2,7 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { MlsWelcomeMessage, Proposal } from "ts-mls";
 
-import type { PendingState, ProposalAction } from "../../engine/types.js";
+import type { CommitProposalInputs, PendingState } from "../../engine/types.js";
 import type { StateNotification } from "../../engine/state-notifications.js";
 import type { PublishResponse } from "../nostr-interface.js";
 import type {
@@ -22,6 +22,8 @@ export type GroupPublishWork =
       welcome?: MlsWelcomeMessage;
       actorPubkey: string;
       welcomeRecipients?: WelcomeRecipient[];
+      /** Cancellation is honored only before network publication begins. */
+      signal?: AbortSignal;
     };
 
 /** Effects emitted by the group session layer for a runtime to drive. */
@@ -69,11 +71,11 @@ export type GroupSessionSendIntent =
   | {
       kind: "commit";
       actorPubkey: string;
-      extraProposals?: (
-        | Proposal
-        | ProposalAction<Proposal>
-        | (Proposal | ProposalAction<Proposal>)[]
-      )[];
+      extraProposals?: CommitProposalInputs;
       proposalRefs?: string[];
       welcomeRecipients?: WelcomeRecipient[];
+      /** Canonical session.parentToken captured before fallible image work. Required for image commits. */
+      expectedParent?: string;
+      /** Abort queued work or preparation before publication; confirmed work remains final. */
+      signal?: AbortSignal;
     };

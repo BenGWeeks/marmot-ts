@@ -37,6 +37,8 @@ export type GroupRuntimeOptions = {
   confirmPublished: (pending: PendingState) => StateNotification[];
   publishFailed: (pending: PendingState) => void;
   save: () => Promise<void>;
+  /** Owner admission fence, checked before transport and after awaits. */
+  assertOpen?: () => void;
   log?: Debugger;
   audit?: AuditSink;
   auditContext?: AuditContextOptions;
@@ -48,6 +50,8 @@ export type PublishCommitOptions = {
   actorPubkey: string;
   welcome?: { welcome?: import("ts-mls").Welcome };
   welcomeRecipients?: WelcomeRecipient[];
+  /** Admission fence; cancellation stops being reversible once publish starts. */
+  signal?: AbortSignal;
 };
 
 /** Drives group publish effects through Nostr and confirms or rolls back state. */
@@ -61,6 +65,7 @@ export class GroupRuntime {
   readonly #confirmPublished: (pending: PendingState) => StateNotification[];
   readonly #publishFailed: (pending: PendingState) => void;
   readonly #save: () => Promise<void>;
+  readonly #assertOpen: () => void;
   readonly #log?: Debugger;
   readonly #audit?: AuditEmitter;
 
@@ -73,6 +78,7 @@ export class GroupRuntime {
     this.#confirmPublished = options.confirmPublished;
     this.#publishFailed = options.publishFailed;
     this.#save = options.save;
+    this.#assertOpen = options.assertOpen ?? (() => {});
     this.#log = options.log;
     this.#audit = createAuditEmitter(
       options.audit && options.auditContext
@@ -126,6 +132,7 @@ export class GroupRuntime {
           actorPubkey: work.actorPubkey,
           welcome: work.welcome,
           welcomeRecipients: work.welcomeRecipients,
+          signal: work.signal,
         });
         return { work, ...result };
       }
@@ -149,10 +156,16 @@ export class GroupRuntime {
           actorPubkey: work.actorPubkey,
           welcome: work.welcome,
           welcomeRecipients: work.welcomeRecipients,
+          signal: work.signal,
         });
     }
   }
 
+  /**
+   * Publish the original signed envelope on every attempt. Its timestamp,
+   * ciphertext and source-epoch expiration are fixed before signing; retries
+   * must reuse this artifact even after the current group policy changes.
+   */
   async publishApplication(
     envelope: NostrEvent,
   ): Promise<Record<string, PublishResponse>> {
@@ -190,8 +203,10 @@ export class GroupRuntime {
     }
 
     try {
+      this.#assertOpen();
       this.#confirmPublished(pending);
     } catch (error) {
+      this.#assertOpen();
       return {
         response,
         notifications: [],
@@ -240,8 +255,10 @@ export class GroupRuntime {
 
     let notifications: StateNotification[];
     try {
+      this.#assertOpen();
       notifications = this.#confirmPublished(pending);
     } catch (error) {
+      this.#assertOpen();
       return {
         response,
         notifications: [],
@@ -268,9 +285,11 @@ export class GroupRuntime {
   }> {
     let response: Record<string, PublishResponse>;
     try {
+      options.signal?.throwIfAborted();
       response = await this.#publishToGroupRelays(
         options.envelope,
         "Failed to publish commit",
+        options.signal,
       );
     } catch (err) {
       this.#publishFailed(options.pending);
@@ -279,8 +298,10 @@ export class GroupRuntime {
 
     let notifications: StateNotification[];
     try {
+      this.#assertOpen();
       notifications = this.#confirmPublished(options.pending);
     } catch (error) {
+      this.#assertOpen();
       return {
         response,
         notifications: [],
@@ -292,6 +313,7 @@ export class GroupRuntime {
     const persistence = await this.#persistConfirmedState();
 
     const innerWelcome = options.welcome?.welcome;
+    this.#assertOpen();
     let welcomeDelivery: GroupPublishResult["welcomeDelivery"] = {
       kind: "notRequired",
     };
@@ -302,7 +324,7 @@ export class GroupRuntime {
         options.welcomeRecipients,
       );
     }
-
+    this.#assertOpen();
     return {
       response,
       notifications,
@@ -313,18 +335,24 @@ export class GroupRuntime {
   }
 
   async #persistConfirmedState(): Promise<GroupPublishResult["persistence"]> {
+    this.#assertOpen();
+    let persistence: GroupPublishResult["persistence"];
     try {
       await this.#save();
-      return { kind: "succeeded" };
+      persistence = { kind: "succeeded" };
     } catch (error) {
-      return { kind: "failed", error: errorDetail(error) };
+      persistence = { kind: "failed", error: errorDetail(error) };
     }
+    this.#assertOpen();
+    return persistence;
   }
 
   async #publishToGroupRelays(
     envelope: NostrEvent,
     failurePrefix: string,
+    signal?: AbortSignal,
   ): Promise<Record<string, PublishResponse>> {
+    this.#assertOpen();
     const relays = this.#getRelays();
     if (!relays)
       throw new Error("Group has no relays available to send messages.");
@@ -332,7 +360,10 @@ export class GroupRuntime {
     this.#emitPublishAttempt(envelope, "group", relays);
     let response: Record<string, PublishResponse>;
     try {
-      response = await this.#getNetwork().publish(relays, envelope);
+      const network = this.#getNetwork();
+      signal?.throwIfAborted();
+      response = await network.publish(relays, envelope);
+      this.#assertOpen();
     } catch (error) {
       this.#emitPublishFailure(envelope, "group", relays, "adapter", error);
       throw error;

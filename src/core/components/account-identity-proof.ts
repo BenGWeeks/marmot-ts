@@ -1,3 +1,4 @@
+import { isReusableKeyPackage } from "../key-package-dictionary.js";
 /**
  * @module @category Core - App Components
  *
@@ -590,6 +591,7 @@ export function validateKeyPackageAccountIdentityProof(
   assertNoAccountIdentityProofComponent(keyPackage.extensions, "key-package");
 
   validateLeafAccountIdentityProof(keyPackage.leafNode, keyPackage.cipherSuite);
+  isReusableKeyPackage(keyPackage);
 }
 
 /**

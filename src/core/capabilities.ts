@@ -19,8 +19,7 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
  * `app_data_dictionary` GroupContext extension (`0x0006`) and mutates them with
  * `app_data_update` proposals (`0x0008`), both from draft-ietf-mls-extensions-09.
  * Every member MUST advertise support for the extension and the proposal type.
- * `last_resort` (`0x000a` extension) is also advertised for key-package reuse,
- * and the `self_remove` proposal (`0x000a` proposal type) for member departure
+ * The `self_remove` proposal (`0x000a` proposal type) is advertised for member departure
  * (`protocol-core/member-departure.md`). The account identity proof (`0x8009`)
  * is a required app component (see `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS
  * required capability, so it is not advertised here.
@@ -44,16 +43,14 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
 export function ensureMarmotCapabilities(
   capabilities: Capabilities,
 ): Capabilities {
-  const extensions = Array.from(capabilities.extensions);
+  const extensions = capabilities.extensions.filter(
+    (type) => type !== LAST_RESORT_EXTENSION_TYPE,
+  );
   const proposals = Array.from(capabilities.proposals);
 
   // app_data_dictionary extension carrying the group's app components.
   if (!extensions.includes(appDataDictionaryExtensionType))
     extensions.push(appDataDictionaryExtensionType);
-
-  // last_resort extension for reusable key packages.
-  if (!extensions.includes(LAST_RESORT_EXTENSION_TYPE))
-    extensions.push(LAST_RESORT_EXTENSION_TYPE);
 
   // agent-text-stream-QUIC `receive` role capability so a group that requires it
   // (e.g. darkmatter's default group) can invite this member. `receive` is an

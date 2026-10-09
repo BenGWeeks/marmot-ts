@@ -59,6 +59,12 @@ export class KeyValueRumorHistoryBackend implements GroupRumorHistoryBackend {
     await this.store.setItem(rumor.id, rumor);
   }
 
+  async removeRumor(rumorId: string): Promise<void> {
+    if (!/^[a-f0-9]{64}$/.test(rumorId))
+      throw new Error("Invalid rumor ID for history removal");
+    await this.store.removeItem(rumorId);
+  }
+
   /** Remove every stored rumor. */
   async clear(): Promise<void> {
     await this.store.clear();

@@ -126,6 +126,8 @@ const groupView = await readWelcomeMarmotGroupView({
 // groupView?.name, groupView?.relays, groupView?.adminPubkeys, etc.
 ```
 
+The preview returns the genuine decrypted GroupInfo after MLS signature, tree and confirmation checks; its `signer` identifies the actual inviter leaf, not the joiner. Preview does not adopt a group or retire a KeyPackage, and it does not replace the full Marmot admission checks below.
+
 ## Joining from Welcome
 
 Use the client API to join from an unwrapped kind 444 rumor:
@@ -134,15 +136,23 @@ Use the client API to join from an unwrapped kind 444 rumor:
 const { group } = await client.joinGroupFromWelcome({ welcomeRumor });
 ```
 
-The client finds the matching local KeyPackage, validates member identity proofs, persists the resulting group state, and marks the consumed KeyPackage as used.
+The client finds the matching local KeyPackage and tentatively processes the Welcome. Before saving anything, it validates the current proof profile, every resulting member's account identity proof, required and known group components, supported capabilities and roles, and active group lifecycle. The author is the **MLS-authenticated GroupInfo signer leaf**: that occupied leaf's account identity must be an active admin in the resulting group, with valid admin/member coupling. The delivery envelope alone cannot authorize admission.
+
+An invalid signature, nonadmin inviter, orphaned admin, unsupported required component, malformed known component, inactive group, or bad proof rejects admission. A resulting MLS group id already retained locally also rejects, including concurrent duplicate joins. These rejections preserve the existing group and referenced KeyPackage material; a Welcome cannot silently repair or replace an existing group.
+
+After validation and duplicate rejection, the client records a consumption receipt and durably saves the group. It then removes a consumed **single-use** package's private material, retains public metadata with `used: true`, and clears the completed receipt. A canonical reusable package keeps its private material. The implementation does not zero shared byte arrays because adopted MLS state can still reference them.
 
 After joining:
 
 - Call `await group.selfUpdate()` as soon as practical, before sending messages, to rotate the leaf key for forward secrecy ([`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md)). The client does not do this automatically.
-- Rotate the consumed KeyPackage with `client.keyPackages.rotate(ref)`. You can find it with `(await client.keyPackages.list()).filter((p) => p.used)`.
+- Publish a replacement with `client.keyPackages.rotate(ref)`. You can find consumed packages with `(await client.keyPackages.list()).filter((p) => p.used)`. Single-use cleanup does not wait for that replacement; reusable material is retained until retirement under its lifecycle policy.
 
-::: warning Spec deviation
-[`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md) requires consumed KeyPackage private material to be deleted. `joinGroupFromWelcome` only marks it used; call `client.keyPackages.rotate(ref)` or `client.keyPackages.remove(ref)` to delete it.
+::: tip Cleanup recovery
+Group and KeyPackage stores are separate. A storage failure can reject the join call after the group was already adopted, leaving a pending cleanup receipt. Startup retries cleanup; you can also call `await client.keyPackages.finalizeConsumptions()`. Retirement confirms that the group exists durably before removing secrets and clears the receipt only after retirement persistence succeeds. Receipts for groups that were never adopted leave private material untouched. Use persistent stores for recovery across process restarts; see [`foundation/key-packages.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/key-packages.md).
+:::
+
+::: warning First-contact trust
+Admin authorization is checked against the received branch's own admin set. On first contact this authenticates the signer and validates that branch, but supplies no independent proof that it is the intended group's continuation. An existing member can fork and rewrite that branch's admin policy. Verify the inviter and group context through your application's trusted contact flow; see [`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md), "Welcome-bootstrap trust".
 :::
 
 ## Welcome Ordering

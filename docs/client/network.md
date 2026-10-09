@@ -125,3 +125,78 @@ export function nostrToolsNetwork(): NostrNetworkInterface {
 ```
 
 KeyPackage discovery uses the account's kind 10002 NIP-65 write relays (`getNip65Relays(event, "write")`); Welcome delivery uses kind 10050 inbox relays (`getInboxRelays(event)`). See [`transports/nostr.md`](https://github.com/marmot-protocol/marmot/blob/master/transports/nostr.md).
+
+## Connecting groups
+
+`await client.groups.connect(groupId, options?)` backfills kind 445 events, fully drains that batch, then installs a live subscription. It returns an `Unsubscribable`. `client.groups.connectAll(options?)` returns its handle immediately and follows the set of loaded groups, starting and stopping their connections as groups are loaded, joined, removed, or unloaded.
+
+Both APIs accept `{ signal?: AbortSignal, fallbackRelays?: string[] }`. Group relays take precedence over fallback relays; groups with neither are skipped. Use an `AbortSignal` to stop a direct connection while its backfill request is still pending:
+
+```typescript
+const controller = new AbortController();
+const pendingConnection = client.groups.connect(group.id, {
+  signal: controller.signal,
+});
+
+// On application teardown, even before pendingConnection resolves:
+controller.abort();
+const connection = await pendingConnection;
+connection.unsubscribe(); // also safe after abort
+```
+
+Cancellation stops intake; it does not cancel the network adapter's outstanding `request` promise. When that request resolves, cancelled backfill is not admitted and no live subscription is installed. `connectAll().unsubscribe()` also cancels connections whose backfill is pending.
+
+### Serialization and disconnect
+
+Backfill and live events enter one queue per group, shared by every connection handle for that group. Each admitted batch's `ingest()` generator is completely drained before the next starts. A failed batch does not permanently stall the queue, and another group can proceed independently. Signature verification and exact singleton `h` routing validation precede insertion into the shared bounded dedup cache.
+
+`unsubscribe()` or abort closes intake immediately. Already admitted batches still run and finish reconciliation; their results remain observable while they drain. The result listener is released when no connection or admitted work remains. The unsubscribe handle is synchronous and supplies no promise for drain completion. Keep application result handlers alive while observing that final work.
+
+This queue covers manager-owned connection intake. If you also call `group.ingest()` directly, serialize those calls with your other operations and consume every yielded result before starting another batch; an abandoned generator has not completed ingestion.
+
+### Connection results and invalidation
+
+Subscribe before connecting:
+
+```typescript
+client.groups.on("ingestResult", (groupId, result) => {
+  if (result.kind === "invalidated") {
+    recordForkRetraction(groupId, {
+      rumorId: result.rumorId,
+      transportId: result.transportId,
+      losingTag: result.tag,
+      losingEpoch: result.epoch,
+      producingCommit: result.commitDigest,
+    });
+  }
+});
+const connections = client.groups.connectAll();
+```
+
+The manager forwards the facade's reconciled result once per connected group, including live, timer-driven, and explicit convergence results. Consuming ingest yields does not produce a second manager notification. Existing `unreadable` and trust-boundary `rejected` events remain available.
+
+For `invalidated`, `rumorId` is the strict canonical inner rumor ID; `transportId` is the signed envelope ID and `event` retains that envelope. `payload` contains decrypted application bytes, and `message` contains the MLS application message. `tag` and `epoch` name the losing delivery state. Optional `commitDigest: Uint8Array` identifies the edge that produced that losing state. It never identifies the commit that triggered reconciliation or the winning branch; root states have no producing commit. The optional fields preserve compatibility, so consumers must handle absent evidence.
+
+Supported history removal completes before the public result when persistence succeeds. Backend errors emit `historyError` and preserve the invalidation and pending retry evidence. Restart attribution requires persisted ingestion state and rewind history; plaintext history alone is insufficient. See [History](/client/history#fork-invalidated-messages) for custom-store migration and failure handling.
+
+## Cancellable group watches
+
+`client.groups.watch({ signal })` yields fresh group-list arrays. Abort finishes an idle or loading watch promptly without waiting for an update. Returning the iterator also wakes a pending `next()` before completion and removes listeners; `throw()` and async disposal perform the same cleanup. A storage request already in progress may finish later, with its rejection handled. Updates arriving during loading or between pulls remain pending for a later snapshot.
+
+```typescript
+const controller = new AbortController();
+const updates = client.groups.watch({ signal: controller.signal });
+const observing = (async () => {
+  for await (const groups of updates) renderGroups(groups);
+})();
+
+// On view teardown:
+controller.abort();
+await observing;
+```
+
+## Production convergence policy
+
+Keep the existing finite profile-1 default (`maxRewindCommits: 5`) for production unless you have deliberately chosen another bounded horizon. Configure a policy at the client boundary to pass it to groups. The horizon controls rollback eligibility; it does not promise complete pruning of every full-history tree or plaintext history record.
+
+`maxRewindCommits: Infinity` is an explicit debugging or forensic choice that keeps arbitrarily old forks eligible and can retain unbounded evidence. It is not production guidance. Broader history-tree, delivery-evidence, and memory-retention pruning remains separate work. See [`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md) and [`protocol-core/retained-history.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/retained-history.md).

@@ -23,6 +23,7 @@ import {
 
 import { marmotAuthService } from "../core/auth-service.js";
 import { getAppComponents } from "../core/components/dictionary.js";
+import { validateGroupImageLegality } from "../core/components/image-validation.js";
 import {
   ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
   type AppComponentId,
@@ -274,6 +275,17 @@ function validateLegalityWithoutProposals(
     requiredIds,
   });
   if (integrity) return { kind: "violation", violation: integrity };
+
+  // The stamped child retains a trustworthy parent-relative dictionary diff.
+  // Check encoding and any recoverable committer against the immutable parent;
+  // unavailable original proposal authors follow the residual policy below.
+  const imageOutcome = validateGroupImageLegality({
+    parentState,
+    resultingState,
+    proposals: [],
+    committerLeafIndex,
+  });
+  if (imageOutcome.kind === "violation") return imageOutcome;
 
   // CR-01: the committer index survives an unresolvable `ProposalRef`, so
   // thread it in rather than skipping classification altogether. The proposal

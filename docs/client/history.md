@@ -42,7 +42,7 @@ const recent = await history.queryRumors({ kinds: [9], limit: 50 });
 
 ## Live timeline — `subscribe`
 
-`subscribe(filters?)` is an async generator that yields the current timeline immediately, then re-yields it whenever a matching rumor is saved or the history is cleared. This is the natural source for a chat view:
+`subscribe(filters?)` is an async generator that yields a fresh filtered timeline, then reloads it whenever a matching rumor is saved, a rumor is removed, or history is cleared. This is the natural source for a chat view:
 
 ```typescript
 for await (const rumors of history.subscribe({ kinds: [9], limit: 100 })) {
@@ -52,7 +52,7 @@ for await (const rumors of history.subscribe({ kinds: [9], limit: 100 })) {
 
 Both self-sent messages (via `client.groups.send`) and ingested messages (via `group.ingest`) flow through the same subscription, so the UI stays consistent without a separate "echo" path.
 
-Two details of the current implementation: `limit` applies only to the initial snapshot, so the timeline grows as new rumors arrive; and a rumor saved while your loop body is still running (between iterations) is not added to that subscription's timeline. Re-query with `queryRumors` if you need an exact view.
+Each snapshot applies the filters and `limit` again. Removing a recent rumor refills a limited page from older surviving records. Changes arriving during loading or while your loop body is running remain pending for the next pull; several changes may coalesce into one fresh snapshot. Your backend must return newest-first results and honor the filters. Already-rendered arrays and pagination pages are application-owned snapshots: replace or retract them when you receive an update.
 
 ## Pagination — `createPaginatedLoader`
 
@@ -70,28 +70,51 @@ async function loadOlder() {
 ## Other methods and events
 
 - `saveRumor(rumor)` — manually persist an unsigned rumor.
+- `removeMessage(rumorId)` — durably remove one canonical inner rumor ID; repeated removal succeeds.
 - `purgeMessages()` — clear all stored rumors for the group.
-- Emits `rumor` (a rumor was saved) and `cleared` (history purged).
+- Emits `rumor` (saved), `removed` (targeted removal completed), and `cleared` (history purged), after the backend operation succeeds.
 
 ## Fork-invalidated messages
 
-History stores a message as soon as it decrypts. If a later convergence rewind abandons the branch that message arrived on, `group.ingest` yields `{ kind: "invalidated", payload }`, but **the message is not removed from history**. `GroupRumorHistory` has no remove method and does not react to invalidation, so an invalidated message stays in `queryRumors`, `subscribe`, and the paginated loader until you delete it.
+History stores a message as soon as it decrypts. When convergence abandons its branch, the session removes its inner rumor from supported history if no surviving delivery supports that rumor ID. The same rumor can arrive in multiple MLS envelopes: withdrawing a losing transport delivery preserves or restores the row when a canonical delivery remains. The `invalidated` result still identifies the affected transport. This applies to live ingestion, timer settlement, explicit reconvergence, and supported restart recovery. `GroupRumorHistory` and `KeyValueRumorHistoryBackend` provide durable targeted removal; open subscriptions refresh after successful reconciliation.
 
-The spec requires that a change which lost branch selection not remain visible to the application as completed ([`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md)). Until the library handles this, retract invalidated messages yourself: run your own ingest loop (see [Fork invalidation](/client/marmot-group#fork-invalidation)), decode the rumor id with `deserializeApplicationData(payload).id`, and remove that key from your backend store. `KeyValueRumorHistoryBackend` keys rumors by id, so removing that key from the `GenericKeyValueStore` you passed it deletes the message. Note that `client.groups.connect()` / `connectAll()` do not surface `invalidated` results.
+Both `client.groups.connect()` and `connectAll()` surface results through the manager's `ingestResult` event. Use this to retract application-owned views or record fork evidence; the configured supported history is already reconciled when removal succeeds:
 
 ```typescript
-import { deserializeApplicationData } from "@internet-privacy/marmot-ts";
-
-// `verifiedEvents`: kind 445 events you fetched and signature-checked yourself
-for await (const result of group.ingest(verifiedEvents)) {
-  if (result.kind === "invalidated" && result.payload) {
-    const { id } = deserializeApplicationData(result.payload);
-    await storeForGroup(group.id).removeItem(id); // the store behind KeyValueRumorHistoryBackend
+client.groups.on("ingestResult", (groupId, result) => {
+  if (result.kind === "invalidated" && result.rumorId) {
+    refreshHistoryView(groupId); // A canonical delivery may still support this rumor.
   }
-}
+});
 ```
 
-Membership and metadata changes withdrawn the same way arrive as `stateInvalidated` / `stateRevalidated`; after applying them, call `group.session.acknowledgeConvergenceEffect(result)`. Open subscriptions do not see the removal until they re-query.
+`rumorId` identifies the affected inner message; `transportId` identifies the withdrawn signed kind 445 envelope. Refresh application-owned rumor views from reconciled history rather than deleting a rumor unconditionally. `tag` and `epoch` identify the losing delivery state. Optional `commitDigest` identifies the commit edge that produced that state, never the winning or triggering commit; root deliveries have no producing edge. `payload` retains decrypted application bytes. See [connection result attribution](/client/network#connection-results-and-invalidation) for the complete contract.
+
+Membership and metadata withdrawals arrive as `stateInvalidated` / `stateRevalidated`. After applying those effects to your application, call `group.session.acknowledgeConvergenceEffect(result)`.
+
+### Persistence and restart limits
+
+For restart attribution, persist both `ingestStateStore` (delivered identities and pending removals) and `rewindStore` (the branch nodes used to validate that evidence), alongside `groupStateStore` and the history backend. Supply those stores to `MarmotClient`, or to lower-level sessions when constructing them directly. Hydration and pending-removal retry run before resumed convergence. Evidence follows the convergence horizon; messages delivered before this ledger existed gain no invented provenance.
+
+Every losing delivery in a rewind batch is recorded as pending before the session saves the winning state or begins history removal. Each successful removal is acknowledged durably, so interrupted cleanup retries all remaining obligations after restart.
+
+The ingestion delivery ledger contains decrypted payloads as well as identities. Protect it like plaintext history. Awaiting `group.destroy()`, `client.groups.destroy()`, or a successful `client.groups.leave()` purges the group's ingestion namespace, including delivery payloads and pending retractions, after admitted writes settle. Destruction closes that session permanently: stale references, delayed hydration, and saves cannot recreate its stored history or delivery ledger. Other groups' namespaces remain intact.
+
+Omitting ingestion persistence or rewind persistence limits attribution to the current session. Persisted plaintext history alone cannot reconstruct its losing branch after restart. Durable stores must preserve `Uint8Array` values and remain isolated per account; see [Storage](/client/storage).
+
+### Custom history migration and errors
+
+Custom `BaseGroupHistory` and `GroupSessionHistory` implementations must add `removeMessage(rumorId: string): Promise<void>`. Custom `GroupRumorHistoryBackend` implementations must add `removeRumor(rumorId: string): Promise<void>`; `GroupRumorHistory` delegates removal to that method.
+
+1. Remove only the exact canonical inner ID (64 lowercase hex characters), rather than the transport ID or an entire epoch.
+2. Make removal idempotent: an already absent record succeeds.
+3. Await durable persistence before resolving. Reject on a storage error; do not swallow it or announce a successful refresh.
+4. In custom reactive histories, notify subscribers after successful removal and reload filtered snapshots so limited views refill.
+5. Persist ingestion and rewind stores to support retry and attribution after restart.
+
+Backend failures surface through `group.on("historyError", handler)` (or `GroupSession`'s `onHistoryError` callback). The invalidation still reaches the caller: the branch is invalid even when storage failed. The session retains pending-removal evidence and retries on activation, including a fresh client restart with both stores persisted. A failed removal can leave stale plaintext visible until retry succeeds; applications should reconcile their displayed views with surviving delivery evidence and report the history error. Successful retry clears pending evidence durably and notifies the history view.
+
+This behavior follows [`protocol-core/convergence.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/convergence.md): losing-branch output must cease to appear as completed application state.
 
 ## Retention and backfill
 

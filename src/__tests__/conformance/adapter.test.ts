@@ -196,9 +196,10 @@ describe("conformance adapter", () => {
       });
     const groups = new Map([["alice", makeGroup()]]);
     await groups.get("alice")!.save(true);
-    const durableBeforeCrash = await store.getItem(
+    const initialDurableState = await store.getItem(
       bytesToHex(clientState.groupContext.groupId),
     );
+    let durableBeforeCrash = initialDurableState;
     const registry = new GroupRegistry({
       store,
       ingestStateStore,
@@ -223,6 +224,11 @@ describe("conformance adapter", () => {
       },
       restart: async (_client, group) => {
         const groupId = group.id.slice();
+        durableBeforeCrash = await store.getItem(bytesToHex(groupId));
+        // Sending now durably preserves the updated ratchet and delivery
+        // evidence. A crash must restore that latest state, not pre-send bytes.
+        expect(durableBeforeCrash).toEqual(serializeClientState(group.state));
+        expect(durableBeforeCrash).not.toEqual(initialDurableState);
         group.dispose();
         return registry.load(groupId);
       },

@@ -17,6 +17,29 @@ const entry = (id: string, epoch: number, stateTag: string) => ({
 });
 
 describe("DeliveredPayloadLedger", () => {
+  it("imports idempotently by transport identity and prunes restored evidence", () => {
+    const original = {
+      ...entry("restored", 1, "tag-root"),
+      transportId: "restored",
+    };
+    const ledger = new DeliveredPayloadLedger<Env>();
+    ledger.importEntries([original, structuredClone(original)]);
+    expect(ledger.size).toBe(1);
+    expect(ledger.exportEntries()[0].commitDigest).toBeUndefined();
+    ledger.pruneBelow(2);
+    expect(ledger.exportEntries()).toEqual([]);
+  });
+  it("exports and restores delivered evidence for restart retraction", () => {
+    const ledger = new DeliveredPayloadLedger<Env>();
+    ledger.record(entry("losing", 2, "tag-losing"));
+    expect(typeof ledger.exportEntries).toBe("function");
+    const restored = new DeliveredPayloadLedger<Env>();
+    restored.importEntries(ledger.exportEntries());
+    expect(
+      restored.invalidatedByRewind(1, new Set()).map((e) => e.envelope.id),
+    ).toEqual(["losing"]);
+    expect(restored.invalidatedByRewind(1, new Set())).toEqual([]);
+  });
   it("record is idempotent for the same state-tag and message identity", () => {
     const ledger = new DeliveredPayloadLedger<Env>();
     const delivered = entry("same", 2, "tag-fork");

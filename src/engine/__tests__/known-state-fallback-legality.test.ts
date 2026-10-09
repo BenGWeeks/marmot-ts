@@ -8,8 +8,19 @@
  * the shortcut must not grandfather in.
  */
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { createCommit, defaultProposalTypes, processMessage } from "ts-mls";
-import { describe, expect, it } from "vitest";
+import {
+  appDataUpdateProposalType,
+  appDataDictionaryExtensionType,
+  bytesToBase64,
+  createCommit,
+  defaultProposalTypes,
+  getAppDataDictionary,
+  makeAppDataDictionaryExtension,
+  processMessage,
+  type ClientState,
+  type Proposal,
+} from "ts-mls";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   seamGroup,
@@ -19,6 +30,286 @@ import { getMarmotGroupView } from "../../core/client-state.js";
 import { getPubkeyLeafNodeIndexes } from "../../core/group-members.js";
 import { createAdminCommitPolicyCallback } from "../admin-policy.js";
 import { resolveCandidateParent } from "../fork-recovery.js";
+import { encodeGroupBlossomImage } from "../../core/components/blossom-image.js";
+import { encodeAdminPolicyV1 } from "../../core/components/admin-policy.js";
+import { encodeComponentsList } from "../../core/components/app-components-list.js";
+import { getAppComponents } from "../../core/components/dictionary.js";
+import {
+  GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+  GROUP_ADMIN_POLICY_COMPONENT_ID,
+  APP_COMPONENTS_COMPONENT_ID,
+  ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+  GROUP_LIFECYCLE_COMPONENT_ID,
+  SAFE_AAD_COMPONENT_ID,
+} from "../../core/components/ids.js";
+
+function component(
+  state: ClientState,
+  id: number,
+  data: Uint8Array | undefined,
+): ClientState {
+  const dictionary = getAppDataDictionary(state.groupContext.extensions)!;
+  return {
+    ...state,
+    groupContext: {
+      ...state.groupContext,
+      extensions: state.groupContext.extensions.map((extension) =>
+        extension.extensionType === appDataDictionaryExtensionType
+          ? makeAppDataDictionaryExtension(
+              [
+                ...dictionary.filter((entry) => entry.componentId !== id),
+                ...(data === undefined ? [] : [{ componentId: id, data }]),
+              ].sort((a, b) => a.componentId - b.componentId),
+            )
+          : extension,
+      ),
+    },
+  };
+}
+
+function imageUpdate(data: Uint8Array): Proposal {
+  return {
+    proposalType: appDataUpdateProposalType,
+    appDataUpdate: {
+      componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+      operation: "update",
+      update: data,
+    },
+  };
+}
+
+describe("known image child recovery", () => {
+  let f: Awaited<ReturnType<typeof seamGroup>>;
+  const present = encodeGroupBlossomImage({
+    kind: "present",
+    imageHash: new Uint8Array(32).fill(1),
+    imageKey: new Uint8Array(32).fill(2),
+    imageNonce: new Uint8Array(12).fill(3),
+    imageUploadKey: new Uint8Array(32).fill(4),
+    mediaType: "image/png",
+  });
+  beforeAll(async () => {
+    f = await seamGroup();
+  });
+
+  it.each([
+    APP_COMPONENTS_COMPONENT_ID,
+    SAFE_AAD_COMPONENT_ID,
+    GROUP_LIFECYCLE_COMPONENT_ID,
+    ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+  ])(
+    "preserves structural/profile guards in proposal-independent recovery for %s",
+    async (id) => {
+      let parent = snapshot(f.admin2Epoch1);
+      if (id === SAFE_AAD_COMPONENT_ID)
+        parent = component(parent, id, new Uint8Array());
+      const commit = await createCommit({
+        context: f.ctx,
+        state: snapshot(parent),
+        wireAsPublicMessage: false,
+      });
+      let child = component(
+        commit.newState,
+        APP_COMPONENTS_COMPONENT_ID,
+        encodeComponentsList(
+          getAppComponents(parent.groupContext.extensions)!.filter(
+            (required) => required !== id,
+          ),
+        ),
+      );
+      if (id !== ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+        child = component(child, id, undefined);
+      const resolution = await resolveCandidateParent({
+        ciphersuite: f.impl,
+        parent,
+        message: commit.commit,
+        callback: createAdminCommitPolicyCallback({
+          ratchetTree: parent.ratchetTree,
+          adminPubkeys: getMarmotGroupView(parent)!.adminPubkeys,
+          ciphersuiteId: f.impl.id,
+        }),
+        known: { parentTag: bytesToHex(parent.confirmationTag), state: child },
+      });
+      expect(resolution.kind).toBe("rejected");
+    },
+  );
+
+  async function resolve(options: {
+    data?: Uint8Array;
+    rebuilt?: boolean;
+    parentAdmins?: string[];
+    resultingAdmins?: string[];
+    authorIndex?: number;
+    privateMessage?: boolean;
+    requiredImage?: boolean;
+    unrequire?: boolean;
+  }) {
+    let parent = options.parentAdmins
+      ? component(
+          snapshot(f.admin2Epoch1),
+          GROUP_ADMIN_POLICY_COMPONENT_ID,
+          encodeAdminPolicyV1(options.parentAdmins),
+        )
+      : snapshot(f.admin2Epoch1);
+    if (options.requiredImage) {
+      parent = component(parent, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, present);
+      parent = component(
+        parent,
+        APP_COMPONENTS_COMPONENT_ID,
+        encodeComponentsList([
+          ...getAppComponents(parent.groupContext.extensions)!,
+          GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+        ]),
+      );
+    }
+    const index = Number(parent.privatePath.leafIndex);
+    const ref = bytesToBase64(new Uint8Array(32).fill(99));
+    const staged = {
+      proposal:
+        options.data === undefined
+          ? {
+              proposalType:
+                appDataUpdateProposalType as typeof appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                operation: "remove" as const,
+              },
+            }
+          : imageUpdate(options.data),
+      senderLeafIndex: options.authorIndex ?? index,
+    };
+    parent.unappliedProposals[ref] = staged;
+    const commit = await createCommit({
+      context: f.ctx,
+      state: snapshot(parent),
+      wireAsPublicMessage: !options.privateMessage,
+      extraProposals: options.unrequire
+        ? [
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: APP_COMPONENTS_COMPONENT_ID,
+                operation: "update",
+                update: encodeComponentsList(
+                  getAppComponents(parent.groupContext.extensions)!.filter(
+                    (id) => id !== GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                  ),
+                ),
+              },
+            },
+          ]
+        : [],
+    });
+    if (!options.rebuilt) parent.unappliedProposals = {};
+    const child = options.resultingAdmins
+      ? component(
+          commit.newState,
+          GROUP_ADMIN_POLICY_COMPONENT_ID,
+          encodeAdminPolicyV1(options.resultingAdmins),
+        )
+      : commit.newState;
+    const view = getMarmotGroupView(parent)!;
+    return resolveCandidateParent({
+      ciphersuite: f.impl,
+      parent,
+      message: commit.commit,
+      callback: createAdminCommitPolicyCallback({
+        ratchetTree: parent.ratchetTree,
+        adminPubkeys: view.adminPubkeys,
+        ciphersuiteId: f.impl.id,
+      }),
+      known: { parentTag: bytesToHex(parent.confirmationTag), state: child },
+    });
+  }
+
+  it.each([false, true])(
+    "supports atomic image unrequire/remove in recovery rebuilt=%s",
+    async (rebuilt) => {
+      expect(
+        (await resolve({ requiredImage: true, unrequire: true, rebuilt })).kind,
+      ).toBe("resolved");
+      expect((await resolve({ requiredImage: true, rebuilt })).kind).toBe(
+        "rejected",
+      );
+      expect(
+        (
+          await resolve({
+            data: encodeGroupBlossomImage({ kind: "empty" }),
+            requiredImage: true,
+            rebuilt,
+          })
+        ).kind,
+      ).toBe("resolved");
+    },
+  );
+  it("rejects unauthorized removal inferred from a recorded dictionary diff", async () => {
+    expect(
+      (
+        await resolve({
+          requiredImage: true,
+          unrequire: true,
+          parentAdmins: [f.adminPubkey],
+        })
+      ).kind,
+    ).toBe("rejected");
+  });
+
+  it("rejects malformed image bytes with unavailable references", async () => {
+    expect((await resolve({ data: new Uint8Array([1]) })).kind).toBe(
+      "rejected",
+    );
+  });
+  it.each([false, true])(
+    "accepts valid present and empty images with rebuilt=%s",
+    async (rebuilt) => {
+      for (const data of [present, encodeGroupBlossomImage({ kind: "empty" })])
+        expect((await resolve({ data, rebuilt })).kind).toBe("resolved");
+    },
+  );
+  it("rejects noncanonical empty bytes even for private stamped children", async () => {
+    expect(
+      (
+        await resolve({
+          data: new Uint8Array([0, 0, 0, 0, 0, 0]),
+          privateMessage: true,
+        })
+      ).kind,
+    ).toBe("rejected");
+  });
+  it("uses parent committer authority despite resulting promotion", async () => {
+    expect(
+      (
+        await resolve({
+          data: present,
+          parentAdmins: [f.adminPubkey],
+          resultingAdmins: [f.adminPubkey, f.admin2Pubkey],
+        })
+      ).kind,
+    ).toBe("rejected");
+  });
+  it("retains parent admin authority despite resulting demotion", async () => {
+    expect(
+      (await resolve({ data: present, resultingAdmins: [f.adminPubkey] })).kind,
+    ).toBe("resolved");
+  });
+  it("rechecks original referenced authors when rebuilding proposals", async () => {
+    expect(
+      (
+        await resolve({
+          data: present,
+          rebuilt: true,
+          parentAdmins: [f.admin2Pubkey],
+          authorIndex: Number(f.adminEpoch1.privatePath.leafIndex),
+        })
+      ).kind,
+    ).toBe("rejected");
+  });
+  it("keeps valid private stamped image children viable without actor attribution", async () => {
+    expect((await resolve({ data: present, privateMessage: true })).kind).toBe(
+      "resolved",
+    );
+  });
+});
 
 describe("known-state shortcut without rebuildable proposals (WR-03)", () => {
   it("still rejects a recorded child that leaves an admin without a member leaf", async () => {

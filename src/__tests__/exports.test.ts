@@ -173,13 +173,78 @@ const PUBLIC_SURFACES: Array<[string, Record<string, unknown>]> = [
 ];
 
 describe("exports", () => {
+  it("exposes image helpers and service through their intended entries", () => {
+    const coreNames = [
+      "canonicalizeGroupImageMediaType",
+      "encodeGroupBlossomImage",
+      "decodeGroupBlossomImage",
+      "buildGroupImageAad",
+      "encryptGroupImage",
+      "decryptGroupImage",
+      "getGroupImageSource",
+      "getGroupImageSnapshotIdentity",
+      "GroupImageIntegrityError",
+    ];
+    for (const name of coreNames) {
+      expect(coreExports).toHaveProperty(name);
+      expect(exports[name as keyof typeof exports]).toBe(
+        coreExports[name as keyof typeof coreExports],
+      );
+    }
+    for (const name of [
+      "GroupImageService",
+      "fetchGroupImageTransport",
+    ] as const) {
+      expect(clientExports).toHaveProperty(name);
+      expect(exports[name]).toBe(clientExports[name]);
+      expect(coreExports).not.toHaveProperty(name);
+    }
+  });
+  it("exposes the shared Marmot credential policy through root and core", () => {
+    expect(coreExports).toHaveProperty("marmotAuthService");
+    expect(exports).toHaveProperty("marmotAuthService");
+    expect(exports.marmotAuthService).toBe(coreExports.marmotAuthService);
+  });
+
+  it("validates basic identity shape and curve without binding the signature key", async () => {
+    const service = coreExports.marmotAuthService;
+    expect(service).toBeDefined();
+    const credential = coreExports.createCredential(
+      "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+    );
+    await expect(
+      service.validateCredential(credential, new Uint8Array()),
+    ).resolves.toBe(true);
+    await expect(
+      service.validateCredential(credential, new Uint8Array(32)),
+    ).resolves.toBe(true);
+    for (const identity of [
+      new Uint8Array(31),
+      new Uint8Array(33),
+      new Uint8Array(32).fill(0xbb),
+    ]) {
+      await expect(
+        service.validateCredential(
+          { ...credential, identity },
+          new Uint8Array(),
+        ),
+      ).resolves.toBe(false);
+    }
+    await expect(
+      service.validateCredential(
+        { credentialType: "x509", certificates: [] },
+        new Uint8Array(),
+      ),
+    ).resolves.toBe(false);
+  });
+
   it("should name every root public-signature symbol from the root", () => {
     expectTypeOf<RootSignatureTypes>().not.toBeNever();
     expectTypeOf(GroupHistoryTree).toBeConstructibleWith();
     expectTypeOf(groupWithdrawnNotificationsByCommit).toBeFunction();
   });
 
-  it("should export the expected members", () => {
+  it("exports the complete group image root surface", () => {
     expect(Object.keys(exports).sort()).toMatchInlineSnapshot(`
       [
         "ACCOUNT_IDENTITY_PROOF_COMPONENT",
@@ -228,6 +293,8 @@ describe("exports", () => {
         "GROUP_PROFILE_COMPONENT",
         "GROUP_PROFILE_COMPONENT_ID",
         "GroupHistoryTree",
+        "GroupImageIntegrityError",
+        "GroupImageService",
         "GroupMediaService",
         "GroupMediaStore",
         "GroupRumorHistory",
@@ -281,8 +348,10 @@ describe("exports", () => {
         "buildAuthorizationProofEvent",
         "buildFallbackFetchUrls",
         "buildForkTreeView",
+        "buildGroupImageAad",
         "calculateKeyPackageRef",
         "canTransitionLifecycle",
+        "canonicalizeGroupImageMediaType",
         "canonicalizeMimeType",
         "checkKeyPackageProposalsTag",
         "classifyChangedLeaf",
@@ -320,12 +389,14 @@ describe("exports", () => {
         "decodeContent",
         "decodeEncryptedMediaPolicyV1",
         "decodeGroupAvatarUrlV1",
+        "decodeGroupBlossomImage",
         "decodeGroupLifecycleV1",
         "decodeGroupProfileV1",
         "decodeMessageRetentionV1",
         "decodeNostrRoutingV1",
         "decodeUtf8",
         "decodeVarint",
+        "decryptGroupImage",
         "decryptGroupMessage",
         "decryptGroupMessageEvent",
         "decryptGroupMessages",
@@ -348,6 +419,7 @@ describe("exports", () => {
         "encodeContent",
         "encodeEncryptedMediaPolicyV1",
         "encodeGroupAvatarUrlV1",
+        "encodeGroupBlossomImage",
         "encodeGroupLifecycleV1",
         "encodeGroupProfileV1",
         "encodeMediaImetaTag",
@@ -355,6 +427,7 @@ describe("exports", () => {
         "encodeNostrRoutingV1",
         "encodeUtf8",
         "encodeVarint",
+        "encryptGroupImage",
         "encryptMediaFile",
         "encryptedMediaBlossomDefault",
         "encryptedMediaEntry",
@@ -362,6 +435,7 @@ describe("exports", () => {
         "ensureMarmotCapabilities",
         "evaluateKeyPackageForGroup",
         "extendedExtensionTypes",
+        "fetchGroupImageTransport",
         "formatMlsTimestamp",
         "generateKeyPackage",
         "getAdminPolicy",
@@ -375,6 +449,8 @@ describe("exports", () => {
         "getEpoch",
         "getGroupAvatarUrl",
         "getGroupIdHex",
+        "getGroupImageSnapshotIdentity",
+        "getGroupImageSource",
         "getGroupLifecycle",
         "getGroupMemberPubkeys",
         "getGroupMembers",
@@ -426,6 +502,7 @@ describe("exports", () => {
         "isLifetimeValid",
         "isLifetimeWithinCap",
         "isProposalMessage",
+        "isReusableKeyPackage",
         "isSameCredential",
         "isValidAccountIdentity",
         "isValidInboxRelayListEvent",
@@ -435,6 +512,7 @@ describe("exports", () => {
         "keyPackageDefaultExtensions",
         "makeAppComponentsExtension",
         "makeLeafAppComponentsExtension",
+        "marmotAuthService",
         "marmotRequiredCapabilitiesExtension",
         "mayApplyRetainedInbound",
         "mayPrepareLocalCommit",
@@ -471,8 +549,10 @@ describe("exports", () => {
         "validateConvergencePolicy",
         "validateGroupMemberAccountIdentityProofs",
         "validateKeyPackageAccountIdentityProof",
+        "validateKeyPackageSlot",
         "validateLeafAccountIdentityProof",
         "validateUpdateProposalAccountIdentityProofs",
+        "validateWelcomeGroup",
         "varintSize",
         "verifyApplicationRumorAuthorship",
         "verifyAuthorizationProof",
@@ -486,6 +566,7 @@ describe("./client exports", () => {
     expect(Object.keys(clientExports).sort()).toMatchInlineSnapshot(`
       [
         "BoundedIdCache",
+        "GroupImageService",
         "GroupMediaService",
         "GroupMediaStore",
         "GroupRumorHistory",
@@ -512,6 +593,7 @@ describe("./client exports", () => {
         "createApplicationMessageIntent",
         "createChatRumor",
         "createInviteIntent",
+        "fetchGroupImageTransport",
         "ingestResultDisposition",
         "selectFairQueuedStateIntent",
       ]
@@ -567,6 +649,7 @@ describe("./core exports", () => {
         "GROUP_NAME_MAX_BYTES",
         "GROUP_PROFILE_COMPONENT",
         "GROUP_PROFILE_COMPONENT_ID",
+        "GroupImageIntegrityError",
         "INBOX_RELAY_LIST_KIND",
         "INBOX_RELAY_TAG",
         "KEY_PACKAGE_APP_COMPONENTS_TAG",
@@ -597,8 +680,10 @@ describe("./core exports", () => {
         "buildAppDataDictionary",
         "buildAuthorizationProofEvent",
         "buildFallbackFetchUrls",
+        "buildGroupImageAad",
         "calculateKeyPackageRef",
         "canTransitionLifecycle",
+        "canonicalizeGroupImageMediaType",
         "canonicalizeMimeType",
         "checkKeyPackageProposalsTag",
         "classifyChangedLeaf",
@@ -628,12 +713,14 @@ describe("./core exports", () => {
         "decodeComponentsList",
         "decodeEncryptedMediaPolicyV1",
         "decodeGroupAvatarUrlV1",
+        "decodeGroupBlossomImage",
         "decodeGroupLifecycleV1",
         "decodeGroupProfileV1",
         "decodeMessageRetentionV1",
         "decodeNostrRoutingV1",
         "decodeUtf8",
         "decodeVarint",
+        "decryptGroupImage",
         "decryptGroupMessage",
         "decryptGroupMessageEvent",
         "decryptGroupMessages",
@@ -654,6 +741,7 @@ describe("./core exports", () => {
         "encodeComponentsList",
         "encodeEncryptedMediaPolicyV1",
         "encodeGroupAvatarUrlV1",
+        "encodeGroupBlossomImage",
         "encodeGroupLifecycleV1",
         "encodeGroupProfileV1",
         "encodeMediaImetaTag",
@@ -661,6 +749,7 @@ describe("./core exports", () => {
         "encodeNostrRoutingV1",
         "encodeUtf8",
         "encodeVarint",
+        "encryptGroupImage",
         "encryptMediaFile",
         "encryptedMediaBlossomDefault",
         "encryptedMediaEntry",
@@ -679,6 +768,8 @@ describe("./core exports", () => {
         "getEpoch",
         "getGroupAvatarUrl",
         "getGroupIdHex",
+        "getGroupImageSnapshotIdentity",
+        "getGroupImageSource",
         "getGroupLifecycle",
         "getGroupMemberPubkeys",
         "getGroupMembers",
@@ -723,6 +814,7 @@ describe("./core exports", () => {
         "isHexKey",
         "isLastResortExtension",
         "isProposalMessage",
+        "isReusableKeyPackage",
         "isSameCredential",
         "isValidAccountIdentity",
         "isValidInboxRelayListEvent",
@@ -731,6 +823,7 @@ describe("./core exports", () => {
         "keyPackageDefaultExtensions",
         "makeAppComponentsExtension",
         "makeLeafAppComponentsExtension",
+        "marmotAuthService",
         "marmotRequiredCapabilitiesExtension",
         "mayApplyRetainedInbound",
         "mayPrepareLocalCommit",
@@ -764,8 +857,10 @@ describe("./core exports", () => {
         "validateConvergencePolicy",
         "validateGroupMemberAccountIdentityProofs",
         "validateKeyPackageAccountIdentityProof",
+        "validateKeyPackageSlot",
         "validateLeafAccountIdentityProof",
         "validateUpdateProposalAccountIdentityProofs",
+        "validateWelcomeGroup",
         "varintSize",
         "verifyApplicationRumorAuthorship",
         "verifyAuthorizationProof",

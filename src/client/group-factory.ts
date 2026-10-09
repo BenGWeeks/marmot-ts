@@ -9,7 +9,6 @@ import {
   ClientState,
   CryptoProvider,
   defaultCryptoProvider,
-  Proposal,
   Welcome,
 } from "ts-mls";
 import type { SerializedClientState } from "../core/client-state.js";
@@ -18,7 +17,7 @@ import { GroupHistoryTree } from "../engine/history-tree.js";
 import { MarmotGroupEngine } from "../engine/group-engine.js";
 import { RetainedHistoryStore } from "../engine/retained-store.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
-import type { ProposalAction } from "../engine/types.js";
+import type { CommitProposalInputs } from "../engine/types.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
 import { createCredential } from "../core/credential.js";
 import { createSimpleGroup, SimpleGroupOptions } from "../core/group.js";
@@ -297,11 +296,7 @@ export class GroupFactory<
     // SEC-01/WIRE-01/WIRE-02 and the credential-identity-equals-author gate.
     // Only the single Add proposal and single Welcome recipient of each
     // resulting commit intent are kept; the rest of the intent is discarded.
-    const extraProposals: (
-      | Proposal
-      | ProposalAction<Proposal>
-      | (Proposal | ProposalAction<Proposal>)[]
-    )[] = [];
+    const extraProposals: CommitProposalInputs = [];
     const recipients: WelcomeRecipient[] = [];
     for (const keyPackageEvent of invitees) {
       const intent = createInviteIntent({

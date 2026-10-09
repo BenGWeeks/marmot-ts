@@ -22,7 +22,7 @@ async function makeClient(network: MockNetwork): Promise<MarmotClient> {
     keyPackageStore: new InMemoryKeyValueStore(),
     signer: account.signer,
     network,
-    clientId: "test-client",
+    clientId: "11".repeat(32),
   });
 }
 
@@ -37,7 +37,7 @@ async function setupTwoMemberGroup(mockNetwork: MockNetwork) {
     keyPackageStore: new InMemoryKeyValueStore(),
     signer: adminAccount.signer,
     network: mockNetwork,
-    clientId: "test-admin",
+    clientId: "aa".repeat(32),
   });
 
   const memberClient = new MarmotClient({
@@ -45,7 +45,7 @@ async function setupTwoMemberGroup(mockNetwork: MockNetwork) {
     keyPackageStore: new InMemoryKeyValueStore(),
     signer: memberAccount.signer,
     network: mockNetwork,
-    clientId: "test-member",
+    clientId: "bb".repeat(32),
   });
 
   // Member publishes a key package
@@ -93,6 +93,81 @@ describe("groups.leave() proposal + destroy semantics", () => {
 
   beforeEach(() => {
     mockNetwork = new MockNetwork();
+  });
+
+  it("successful leave waits for a blocked disband request and purges it without publishing", async () => {
+    const account = PrivateKeyAccount.generateNew();
+    const lifecycleStore = new InMemoryKeyValueStore<Uint8Array>();
+    const groupStateStore = new InMemoryKeyValueStore<Uint8Array>();
+    const client = new MarmotClient({
+      groupStateStore,
+      ingestStateStore: lifecycleStore,
+      lifecycleStore,
+      keyPackageStore: new InMemoryKeyValueStore(),
+      signer: account.signer,
+      network: mockNetwork,
+    });
+    const group = await client.groups.create("Leave race", {
+      relays: ["wss://mock-relay.test"],
+    });
+    await group.session.hydrateLifecycleEvidence();
+    const id = bytesToHex(group.id);
+    let releaseLeave!: () => void;
+    let publishEntered!: () => void;
+    const leaveBlocked = new Promise<void>((resolve) => {
+      releaseLeave = resolve;
+    });
+    const leaveEntered = new Promise<void>((resolve) => {
+      publishEntered = resolve;
+    });
+    const publish = mockNetwork.publish.bind(mockNetwork);
+    const publication = vi
+      .spyOn(mockNetwork, "publish")
+      .mockImplementation(async (relays, event) => {
+        publishEntered();
+        await leaveBlocked;
+        return publish(relays, event);
+      });
+    const leave = client.groups.leave(group.id);
+    await leaveEntered;
+    let releaseRequest!: () => void;
+    let requestEntered!: () => void;
+    const requestBlocked = new Promise<void>((resolve) => {
+      releaseRequest = resolve;
+    });
+    const requestStarted = new Promise<void>((resolve) => {
+      requestEntered = resolve;
+    });
+    const write = lifecycleStore.setItem.bind(lifecycleStore);
+    vi.spyOn(lifecycleStore, "setItem").mockImplementation(
+      async (key: string, value: Uint8Array) => {
+        if (key === `${id}/disband/request`) {
+          requestEntered();
+          await requestBlocked;
+        }
+        return write(key, value);
+      },
+    );
+    const request = group.session.requestDisband();
+    const rejected = expect(request).rejects.toThrow("Group destroyed");
+    await requestStarted;
+    releaseLeave();
+    await vi.waitFor(() => expect(group.session.destroyed).toBe(true));
+    let left = false;
+    void leave.then(() => {
+      left = true;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(left).toBe(false);
+    releaseRequest();
+    await Promise.all([leave, rejected]);
+    expect(publication).toHaveBeenCalledOnce();
+    expect(
+      (await lifecycleStore.keys()).filter((key: string) =>
+        key.startsWith(`${id}/`),
+      ),
+    ).toEqual([]);
+    expect(await groupStateStore.getItem(id)).toBeNull();
   });
 
   it("publishes a leave proposal event to group relays", async () => {

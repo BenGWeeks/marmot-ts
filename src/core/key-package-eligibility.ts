@@ -4,6 +4,7 @@ import type { ClientState, GroupInfo } from "ts-mls";
 
 import { getMarmotGroupInfo } from "./client-state.js";
 import { getCredentialPubkey } from "./credential.js";
+import { isReusableKeyPackage } from "./key-package.js";
 import {
   AGENT_TEXT_STREAM_QUIC_FANOUT_EXTENSION_TYPE,
   AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE,
@@ -118,6 +119,7 @@ export function evaluateKeyPackageForGroup(
 
   try {
     const keyPackage = getKeyPackage(keyPackageEvent);
+    isReusableKeyPackage(keyPackage);
     cipherSuite = keyPackage.cipherSuite;
 
     const memberPubkey = getCredentialPubkey(keyPackage.leafNode.credential);

@@ -84,11 +84,29 @@ assert(!isSameCredential(myCredential, otherCredential));
 
 ## Authentication
 
-Credentials are validated internally by Marmot's MLS authentication service (not part of the public API), which is applied on group creation, Welcome joins, and inbound commits:
+`marmotAuthService` is the supported MLS credential policy, available from both the root package and `/core`. Marmot applies it internally on group creation, Welcome joins, and inbound commits. Integrations using lower-level MLS APIs can supply the same policy:
+
+```typescript
+import {
+  createCredential,
+  marmotAuthService,
+} from "@internet-privacy/marmot-ts/core";
+// Also available: import { marmotAuthService } from "@internet-privacy/marmot-ts";
+
+const credential = createCredential(nostrPubkey);
+const accepted = await marmotAuthService.validateCredential(
+  credential,
+  mlsSignaturePublicKey,
+);
+```
+
+The policy returns a boolean:
 
 - the credential type MUST be `basic`;
 - the identity MUST be exactly 32 bytes and a valid x-only secp256k1 public key ([`foundation/identity.md`](https://github.com/marmot-protocol/marmot/blob/master/foundation/identity.md));
 - MLS verifies message signatures, and Marmot separately verifies each leaf's `0x8009` account identity proof.
+
+The policy deliberately ignores the `signaturePublicKey` parameter. `accepted === true` establishes the credential's identity shape and curve validity only: it does not bind that identity to an MLS signing key, verify an account proof, validate all group members or components, or authorize the Welcome inviter. Continue to use Marmot's KeyPackage/member proof checks and validated group admission; a valid credential alone does not authorize joining or administering a group. See [Welcome](./welcome) and [`protocol-core/joining.md`](https://github.com/marmot-protocol/marmot/blob/master/protocol-core/joining.md).
 
 To check an identity yourself, use `isValidAccountIdentity(bytes)`:
 

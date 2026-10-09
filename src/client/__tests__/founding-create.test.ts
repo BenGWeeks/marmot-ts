@@ -60,6 +60,8 @@ import type { StoredKeyPackage } from "../key-package-manager.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import type { GenericKeyValueStore } from "../../utils/key-value.js";
 import { MockNetwork } from "../../__tests__/helpers/mock-network.js";
+import { MarmotGroupEngine } from "../../engine/group-engine.js";
+import { defaultProposalTypes, type Proposal } from "ts-mls";
 
 const RELAYS = ["wss://mock-relay.test"];
 
@@ -124,7 +126,7 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
           keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
           signer: account.signer,
           network: mockNetwork,
-          clientId: `test-invitee-${index}`,
+          clientId: index.toString(16).padStart(64, "0"),
         }),
     );
   });
@@ -139,6 +141,103 @@ describe("Founding group creation via Welcome (FOUND-01..05; D-01/D-03/D-04/D-08
     if (!event) throw new Error("expected a published KeyPackage event");
     return event;
   }
+
+  it.each(["array", "empty", "mixed"] as const)(
+    "handles a %s proposal builder result before founding persistence or delivery",
+    async (shape) => {
+      const invitees = [
+        await publishKeyPackage(inviteeClients[0]!),
+        await publishKeyPackage(inviteeClients[1]!),
+      ];
+      const originalSend = MarmotGroupEngine.prototype.send;
+      const spy = vi
+        .spyOn(MarmotGroupEngine.prototype, "send")
+        .mockImplementation(async function (intent) {
+          if (intent.kind !== "foundingAdd")
+            return originalSend.call(this, intent);
+          const originalInputs = intent.extraProposals;
+          const parent = this.state;
+          try {
+            return await originalSend.call(this, {
+              ...intent,
+              extraProposals: [
+                async (context) => {
+                  if (shape === "empty") return [];
+                  const proposals: Proposal[] = [];
+                  for (const item of originalInputs.flat()) {
+                    const result =
+                      typeof item === "function" ? await item(context) : item;
+                    proposals.push(
+                      ...(Array.isArray(result) ? result : [result]),
+                    );
+                  }
+                  if (shape === "mixed")
+                    proposals.push({
+                      proposalType: defaultProposalTypes.remove,
+                      remove: { removed: 0 },
+                    });
+                  return proposals;
+                },
+              ],
+            });
+          } catch (error) {
+            expect(this.state).toBe(parent);
+            expect(this.lifecycle).toBe("Stable");
+            throw error;
+          }
+        });
+      try {
+        const creation = adminClient.groups.create("Builder founding group", {
+          relays: RELAYS,
+          invitees,
+        });
+        if (shape === "array") {
+          const group = await creation;
+          expect(group.state.groupContext.epoch).toBe(1n);
+          expect(group.info.members.pubkeys).toHaveLength(3);
+          expect(
+            mockNetwork.events.filter((e) => e.kind === 1059),
+          ).toHaveLength(2);
+        } else {
+          await expect(creation).rejects.toThrow(
+            shape === "empty" ? /empty proposal/i : /may only carry Add/,
+          );
+          expect(await adminGroupStateStore.keys()).toHaveLength(0);
+          expect(adminClient.groups.loaded).toHaveLength(0);
+          expect(
+            mockNetwork.events.filter((e) => e.kind === 1059),
+          ).toHaveLength(0);
+        }
+        expect(
+          mockNetwork.events.filter((e) => e.kind === GROUP_EVENT_KIND),
+        ).toHaveLength(0);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it("keeps the convenience propose array path publishing each proposal", async () => {
+    const group = await adminClient.groups.create("Proposal convenience", {
+      relays: RELAYS,
+    });
+    const events = [
+      await publishKeyPackage(inviteeClients[0]!),
+      await publishKeyPackage(inviteeClients[1]!),
+    ];
+    const { proposeInviteUser } =
+      await import("../group/proposals/invite-user.js");
+    await group.propose(async (context) => {
+      const proposals: Proposal[] = [];
+      for (const event of events)
+        proposals.push(await proposeInviteUser(event)(context));
+      return proposals;
+    });
+    expect(
+      mockNetwork.events.filter((e) => e.kind === GROUP_EVENT_KIND),
+    ).toHaveLength(2);
+    expect(Object.keys(group.state.unappliedProposals)).toHaveLength(2);
+  });
 
   it("Test 1 (FOUND-01): creating a group with two invitees publishes zero kind-445 events", async () => {
     const adminPubkey = await adminAccount.signer.getPublicKey();

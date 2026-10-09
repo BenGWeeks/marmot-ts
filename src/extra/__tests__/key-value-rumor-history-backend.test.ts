@@ -147,6 +147,27 @@ describe("KeyValueRumorHistoryBackend.queryRumors", () => {
 // ---------------------------------------------------------------------------
 
 describe("GroupRumorHistory over KeyValueRumorHistoryBackend", () => {
+  it("durably removes by inner ID, refills limited pages, and remains idempotent after restart", async () => {
+    const store = new InMemoryKeyValueStore<Rumor>();
+    const history = new GroupRumorHistory(
+      new KeyValueRumorHistoryBackend(store),
+    );
+    const older = makeRumor({ id: nextId(), created_at: 1 });
+    const newer = makeRumor({ id: nextId(), created_at: 2 });
+    await history.saveRumor(older);
+    await history.saveRumor(newer);
+    const timeline = history.subscribe({ kinds: [1], limit: 1 });
+    expect(await nextValue(timeline)).toEqual([newer]);
+    await history.removeMessage(newer.id);
+    expect(await nextValue(timeline)).toEqual([older]);
+    const restarted = new KeyValueRumorHistoryBackend(store);
+    await restarted.removeRumor(newer.id);
+    expect(await restarted.queryRumors({})).toEqual([older]);
+    await expect(history.removeMessage("not-an-id")).rejects.toThrow(
+      "Invalid rumor ID",
+    );
+    await timeline.return(undefined);
+  });
   it("subscribe() yields the persisted snapshot then live additions", async () => {
     const backend = makeBackend();
     const persisted = makeRumor({ id: nextId(), created_at: 1_000 });

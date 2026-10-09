@@ -41,7 +41,376 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const TEST_CLIENT_ID = "test-client-desktop";
+const TEST_CLIENT_ID = "ab".repeat(32);
+
+describe("publication slots and durable routes", () => {
+  it("retains explicit observation routes across duplicate tracking and restart", async () => {
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const source = new KeyPackageManager({
+      store: new InMemoryKeyValueStore(),
+      signer,
+      network,
+      clientId: "ab".repeat(32),
+    });
+    const pkg = await source.create({ relays: ["wss://source.test"] });
+    const event = network.events[0];
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const options = { store, signer, network };
+    const observer = new KeyPackageManager(options);
+    expect(await observer.track(event, ["wss://one.test"])).toBe(true);
+    expect(
+      await observer.track(event, [
+        "wss://one.test/",
+        "wss://two.test",
+        "invalid",
+      ]),
+    ).toBe(true);
+    const restarted = new KeyPackageManager(options);
+    expect((await restarted.get(pkg.keyPackageRef))?.publicationRelays).toEqual(
+      ["wss://one.test/", "wss://two.test/"],
+    );
+    const publish = vi.spyOn(network, "publish");
+    await restarted.purge(pkg.keyPackageRef);
+    expect(publish.mock.calls[0][0]).toEqual([
+      "wss://one.test/",
+      "wss://two.test/",
+    ]);
+  });
+
+  it("preserves old route-less records on purge failure without using relay tags", async () => {
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const manager = new KeyPackageManager({
+      store,
+      signer,
+      network,
+      clientId: "ab".repeat(32),
+    });
+    const pkg = await manager.create({ relays: ["wss://local.test"] });
+    const { publicationRelays: _routes, ...legacy } = (await manager.get(
+      pkg.keyPackageRef,
+    ))!;
+    const stored = {
+      ...legacy,
+      published: legacy.published!.map((event) => ({
+        ...event,
+        tags: [...event.tags, ["relays", "wss://untrusted.test"]],
+      })),
+    };
+    await store.setItem(bytesToHex(pkg.keyPackageRef), stored);
+    const sign = vi.spyOn(signer, "signEvent");
+    await expect(manager.purge(pkg.keyPackageRef)).rejects.toThrow(
+      MissingRelayError,
+    );
+    expect(await manager.get(pkg.keyPackageRef)).toEqual(stored);
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it("skips malformed reusable packages before Welcome adoption or consumption", async () => {
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const manager = new KeyPackageManager({
+      store,
+      signer,
+      network,
+      clientId: "ab".repeat(32),
+    });
+    const pkg = await manager.create({ relays: ["wss://local.test"] });
+    const entry = (await manager.get(pkg.keyPackageRef))!;
+    const legacy = {
+      ...entry,
+      publicPackage: {
+        ...entry.publicPackage,
+        extensions: [
+          makeCustomExtension({
+            extensionType: 10,
+            extensionData: new Uint8Array(),
+          }),
+        ],
+      },
+    };
+    await store.setItem(bytesToHex(pkg.keyPackageRef), legacy);
+    expect(
+      await manager.selectForWelcome({
+        cipherSuite: entry.publicPackage.cipherSuite,
+        secrets: [],
+        encryptedGroupInfo: new Uint8Array(),
+      }),
+    ).toEqual([]);
+    expect(await manager.getPrivateKey(pkg.keyPackageRef)).toEqual(
+      entry.privatePackage,
+    );
+  });
+  it.each([
+    "desktop",
+    "AB".repeat(32),
+    "a".repeat(63),
+    "a".repeat(65),
+    "gg".repeat(32),
+    " " + "a".repeat(64),
+    "",
+  ])("rejects invalid clientId %s before effects", (clientId) => {
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const sign = vi.spyOn(signer, "signEvent");
+    const set = vi.spyOn(store, "setItem");
+    const network = new MockNetwork();
+    const publish = vi.spyOn(network, "publish");
+    expect(
+      () => new KeyPackageManager({ store, signer, network, clientId }),
+    ).toThrow("32 random bytes");
+    expect(sign).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "desktop",
+    "AB".repeat(32),
+    "a".repeat(63),
+    "a".repeat(65),
+    "gg".repeat(32),
+    " " + "a".repeat(64),
+    "",
+  ])(
+    "rejects explicit create and rotation slot %s before effects",
+    async (identifier) => {
+      const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+      const signer = PrivateKeyAccount.generateNew().signer;
+      const network = new MockNetwork();
+      const manager = new KeyPackageManager({ store, signer, network });
+      const sign = vi.spyOn(signer, "signEvent");
+      const set = vi.spyOn(store, "setItem");
+      const get = vi.spyOn(store, "getItem");
+      const publish = vi.spyOn(network, "publish");
+      await expect(
+        manager.create({ identifier, relays: ["wss://relay.test"] }),
+      ).rejects.toThrow("32 random bytes");
+      await expect(
+        manager.rotate("a".repeat(64), {
+          d: identifier,
+          relays: ["wss://relay.test"],
+        }),
+      ).rejects.toThrow("32 random bytes");
+      expect(sign).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+      expect(get).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rotates after restart using stored routes and retains slot and normalized routes", async () => {
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const options = { store, signer, network, clientId: "ab".repeat(32) };
+    const first = await new KeyPackageManager(options).create({
+      relays: ["wss://relay.test", "wss://relay.test/", "bad-url"],
+    });
+    const restarted = new KeyPackageManager(options);
+    const publish = vi.spyOn(network, "publish");
+    const rotated = await restarted.rotate(first.keyPackageRef);
+    expect(rotated.identifier).toBe(options.clientId);
+    expect(
+      (await restarted.get(rotated.keyPackageRef))?.publicationRelays,
+    ).toEqual(["wss://relay.test/"]);
+    expect((await restarted.list())[0].publicationRelays).toEqual([
+      "wss://relay.test/",
+    ]);
+    expect(publish.mock.calls[0][0]).toEqual(["wss://relay.test/"]);
+    expect(publish.mock.calls[0][1].tags.some((t) => t[0] === "relays")).toBe(
+      false,
+    );
+  });
+
+  it("prefers explicit rotation routes and preserves route-less records", async () => {
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const manager = new KeyPackageManager({
+      store,
+      signer,
+      network,
+      clientId: "ab".repeat(32),
+    });
+    const first = await manager.create({ relays: ["wss://old.test"] });
+    const publish = vi.spyOn(network, "publish");
+    const second = await manager.rotate(first.keyPackageRef, {
+      relays: ["wss://new.test"],
+    });
+    expect(publish.mock.calls[0][0]).toEqual(["wss://new.test/"]);
+    const before = (await manager.get(second.keyPackageRef))!;
+    const { publicationRelays: _routes, ...legacy } = before;
+    await store.setItem(bytesToHex(second.keyPackageRef), legacy);
+    const sign = vi.spyOn(signer, "signEvent");
+    await expect(manager.rotate(second.keyPackageRef)).rejects.toThrow(
+      "no relay URLs available",
+    );
+    expect(await manager.get(second.keyPackageRef)).toEqual(legacy);
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it("purges after restart using the union of local routes and consumption metadata", async () => {
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    const signer = PrivateKeyAccount.generateNew().signer;
+    const network = new MockNetwork();
+    const options = {
+      store,
+      signer,
+      network,
+      clientId: "ab".repeat(32),
+      hasAdoptedGroup: async () => true,
+    };
+    const manager = new KeyPackageManager(options);
+    const first = await manager.create({
+      relays: ["wss://one.test"],
+      isLastResort: false,
+    });
+    const second = await manager.create({
+      relays: ["wss://two.test", "wss://one.test/"],
+      identifier: "cd".repeat(32),
+    });
+    await manager.recordConsumption(
+      new Uint8Array(32).fill(1),
+      first.keyPackageRef,
+    );
+    await manager.finalizeConsumptions();
+    const restarted = new KeyPackageManager(options);
+    expect(await restarted.getPrivateKey(first.keyPackageRef)).toBeNull();
+    const publish = vi.spyOn(network, "publish");
+    await restarted.purge([first.keyPackageRef, second.keyPackageRef]);
+    expect(publish.mock.calls[0][0]).toEqual([
+      "wss://one.test/",
+      "wss://two.test/",
+    ]);
+    expect(publish.mock.calls[0][1].kind).toBe(5);
+    expect(await restarted.get(first.keyPackageRef)).toBeNull();
+  });
+});
+
+describe("durable KeyPackage consumption receipts", () => {
+  async function fixture(isLastResort = false) {
+    const account = PrivateKeyAccount.generateNew();
+    const store = new InMemoryKeyValueStore<StoredKeyPackage>();
+    let adopted = false;
+    const options = {
+      store,
+      signer: account.signer,
+      network: new MockNetwork(),
+      hasAdoptedGroup: async () => adopted,
+    };
+    const manager = new KeyPackageManager(options);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const kp = await generateKeyPackage({
+      credential: createCredential(await account.signer.getPublicKey()),
+      signer: account.signer,
+      ciphersuiteImpl,
+      isLastResort,
+    });
+    const ref = await manager.add(kp);
+    const entry = (await manager.get(ref))!;
+    const groupId = new Uint8Array(32).fill(7);
+    return {
+      manager,
+      store,
+      options,
+      ref,
+      entry,
+      kp,
+      groupId,
+      adopt: () => {
+        adopted = true;
+      },
+    };
+  }
+
+  it("leaves pre-adoption receipts and private material unchanged across restart", async () => {
+    const f = await fixture();
+    await f.manager.recordConsumption(f.groupId, f.entry.keyPackageRef);
+    const before = structuredClone(await f.store.getItem(f.ref));
+    expect(before?.consumptionReceipts).toEqual([
+      { groupId: f.groupId, keyPackageRef: f.entry.keyPackageRef },
+    ]);
+    const restarted = new KeyPackageManager(f.options);
+    expect(await restarted.get(f.ref)).toEqual(before);
+    expect(await restarted.getPrivateKey(f.ref)).toEqual(f.kp.privatePackage);
+    f.adopt();
+    await restarted.finalizeConsumptions();
+    expect(await restarted.getPrivateKey(f.ref)).toBeNull();
+    expect((await restarted.get(f.ref))?.consumptionReceipts).toBeUndefined();
+  });
+
+  it("automatically retires an adopted single-use package on restart, idempotently", async () => {
+    const f = await fixture();
+    await f.manager.recordConsumption(f.groupId, f.entry.keyPackageRef);
+    f.adopt();
+    const restarted = new KeyPackageManager(f.options);
+    expect(await restarted.has(f.ref)).toBe(false);
+    const after = structuredClone(await restarted.get(f.ref));
+    expect(after).toMatchObject({
+      used: true,
+      publicPackage: f.kp.publicPackage,
+    });
+    expect(after?.privatePackage).toBeUndefined();
+    await restarted.finalizeConsumptions();
+    expect(await restarted.get(f.ref)).toEqual(after);
+    expect(f.kp.privatePackage).toEqual(f.entry.privatePackage);
+  });
+
+  it("retains reusable private material and clears its receipt after adoption", async () => {
+    const f = await fixture(true);
+    const privateBefore = structuredClone(f.kp.privatePackage);
+    await f.manager.recordConsumption(f.groupId, f.entry.keyPackageRef);
+    f.adopt();
+    const restarted = new KeyPackageManager(f.options);
+    expect(await restarted.getPrivateKey(f.ref)).toEqual(privateBefore);
+    expect((await restarted.get(f.ref))?.used).toBe(true);
+    expect((await restarted.get(f.ref))?.consumptionReceipts).toBeUndefined();
+  });
+
+  it.each(["retirement", "receipt-clear"])(
+    "recovers after a crash during %s persistence",
+    async (point) => {
+      const f = await fixture();
+      await f.manager.recordConsumption(f.groupId, f.entry.keyPackageRef);
+      f.adopt();
+      const before = structuredClone(await f.store.getItem(f.ref));
+      const write = f.store.setItem.bind(f.store);
+      const failure = vi
+        .spyOn(f.store, "setItem")
+        .mockImplementation(async (key, value) => {
+          if (
+            value.used &&
+            (point === "retirement" || !value.consumptionReceipts)
+          )
+            throw new Error("simulated crash");
+          return write(key, value);
+        });
+      await expect(f.manager.finalizeConsumptions()).rejects.toThrow(
+        "simulated crash",
+      );
+      expect((await f.store.getItem(f.ref))?.consumptionReceipts).toEqual(
+        before?.consumptionReceipts,
+      );
+      if (point === "retirement")
+        expect((await f.store.getItem(f.ref))?.privatePackage).toEqual(
+          before?.privatePackage,
+        );
+      else
+        expect((await f.store.getItem(f.ref))?.privatePackage).toBeUndefined();
+      failure.mockRestore();
+      const restarted = new KeyPackageManager(f.options);
+      expect(await restarted.getPrivateKey(f.ref)).toBeNull();
+      expect((await restarted.get(f.ref))?.consumptionReceipts).toBeUndefined();
+    },
+  );
+});
 
 function makeManager(
   network: MockNetwork,
@@ -133,7 +502,7 @@ describe("KeyPackageManager", () => {
 
     it("uses explicit d option, overriding clientId", async () => {
       const { manager } = makeManager(network, account, TEST_CLIENT_ID);
-      const explicitD = "explicit-slot-id";
+      const explicitD = "cd".repeat(32);
       const pkg = await manager.create({
         relays: ["wss://relay.test"],
         identifier: explicitD,
@@ -215,12 +584,15 @@ describe("KeyPackageManager", () => {
       expect(events[0].id).toBe(networkEvent?.id);
     });
 
-    it("records relay URLs on the published event", async () => {
+    it("retains relay URLs locally and omits relay tags", async () => {
       const { manager } = makeManager(network, account, TEST_CLIENT_ID);
       const pkg = await manager.create({ relays: ["wss://relay.test"] });
 
       const events = await getPublished(manager, pkg.keyPackageRef);
-      expect(getKeyPackageRelays(events[0])).toEqual(["wss://relay.test/"]);
+      expect(getKeyPackageRelays(events[0])).toBeUndefined();
+      expect((await manager.get(pkg.keyPackageRef))?.publicationRelays).toEqual(
+        ["wss://relay.test/"],
+      );
     });
 
     it("emits added and published events", async () => {
@@ -385,9 +757,10 @@ describe("KeyPackageManager", () => {
       const newPkg = await manager.rotate(pkg.keyPackageRef);
 
       const events = await getPublished(manager, newPkg.keyPackageRef);
-      expect(getKeyPackageRelays(events[0])).toContain(
-        "wss://specific-relay.test/",
-      );
+      expect(getKeyPackageRelays(events[0])).toBeUndefined();
+      expect(
+        (await manager.get(newPkg.keyPackageRef))?.publicationRelays,
+      ).toContain("wss://specific-relay.test/");
     });
 
     it("skips relay deletion if the old key package was never published", async () => {
@@ -537,7 +910,7 @@ describe("KeyPackageManager", () => {
       const pkg1 = await manager.create({ relays: ["wss://relay.test"] });
       const pkg2 = await manager.create({
         relays: ["wss://relay2.test"],
-        identifier: "second-slot",
+        identifier: "ef".repeat(32),
       });
 
       await manager.purge([pkg1.keyPackageRef, pkg2.keyPackageRef]);
@@ -553,7 +926,7 @@ describe("KeyPackageManager", () => {
       const pkg1 = await manager.create({ relays: ["wss://relay.test"] });
       const pkg2 = await manager.create({
         relays: ["wss://relay2.test"],
-        identifier: "second-slot",
+        identifier: "ef".repeat(32),
       });
 
       await manager.purge([pkg1.keyPackageRef, pkg2.keyPackageRef]);
@@ -745,7 +1118,7 @@ describe("KeyPackageManager", () => {
       expect(stored?.identifier).toBe(TEST_CLIENT_ID);
     });
 
-    it("records relay URLs from the event's relays tag", async () => {
+    it("retains local relay routes when tracking an event", async () => {
       const { manager } = makeManager(network, account, TEST_CLIENT_ID);
       const pkg = await manager.create({
         relays: ["wss://relay1.test", "wss://relay2.test"],
@@ -757,10 +1130,10 @@ describe("KeyPackageManager", () => {
       await manager.track({ ...realEvent, id: "e".repeat(64) });
 
       const events = await getPublished(manager, pkg.keyPackageRef);
-      expect(getKeyPackageRelays(events[0])).toEqual([
-        "wss://relay1.test/",
-        "wss://relay2.test/",
-      ]);
+      expect(getKeyPackageRelays(events[0])).toBeUndefined();
+      expect((await manager.get(pkg.keyPackageRef))?.publicationRelays).toEqual(
+        ["wss://relay1.test/", "wss://relay2.test/"],
+      );
     });
 
     it("records a valid key package event from another device (no local private key)", async () => {
@@ -771,7 +1144,7 @@ describe("KeyPackageManager", () => {
       const { manager: otherManager } = makeManager(
         otherNetwork,
         otherAccount,
-        "other-device",
+        "cd".repeat(32),
       );
       await otherManager.create({ relays: ["wss://relay.test"] });
 
@@ -848,7 +1221,7 @@ describe("KeyPackageManager", () => {
       const { manager: otherManager } = makeManager(
         otherNetwork,
         otherAccount,
-        "other-device",
+        "cd".repeat(32),
       );
       await otherManager.create({ relays: ["wss://relay.test"] });
       const foreignEvent = otherNetwork.events.find(
@@ -1119,7 +1492,7 @@ describe("KeyPackageManager", () => {
       const pkg = await manager.create({ relays: ["wss://relay.test"] });
       await manager.create({
         relays: ["wss://relay.test"],
-        identifier: "second-slot",
+        identifier: "ef".repeat(32),
       });
 
       await manager.markUsed(pkg.keyPackageRef);
@@ -1168,7 +1541,7 @@ describe("KeyPackageManager", () => {
       await manager.create({ relays: ["wss://relay.test"] });
       await manager.create({
         relays: ["wss://relay.test"],
-        identifier: "second-slot",
+        identifier: "ef".repeat(32),
       });
 
       expect(await manager.list()).toHaveLength(2);
@@ -1216,7 +1589,7 @@ describe("KeyPackageManager", () => {
       const { manager: otherManager } = makeManager(
         otherNetwork,
         otherAccount,
-        "other-device",
+        "cd".repeat(32),
       );
       await otherManager.create({ relays: ["wss://relay.test"] });
       const foreignEvent = otherNetwork.events.find(
@@ -1259,9 +1632,8 @@ describe("KeyPackageManager", () => {
 
       expect(value[0].keyPackageRef).toEqual(pkg.keyPackageRef);
       expect(value[0].published).toHaveLength(1);
-      expect(getKeyPackageRelays(value[0].published![0])).toContain(
-        "wss://relay.test/",
-      );
+      expect(getKeyPackageRelays(value[0].published![0])).toBeUndefined();
+      expect(value[0].publicationRelays).toContain("wss://relay.test/");
     });
 
     it("yields updated snapshot after a key package is added", async () => {

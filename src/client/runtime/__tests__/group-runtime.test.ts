@@ -1,8 +1,16 @@
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import type { Welcome } from "ts-mls";
+import type { Welcome, MlsWelcomeMessage } from "ts-mls";
+import {
+  appDataUpdateProposalType,
+  defaultCryptoProvider,
+  getCiphersuiteImpl,
+  protocolVersions,
+  wireformats,
+} from "ts-mls";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MarmotGroupView } from "../../../core/client-state.js";
+import { getMarmotGroupView } from "../../../core/client-state.js";
 import type { PendingState } from "../../../engine/types.js";
 import type { StateNotification } from "../../../engine/state-notifications.js";
 import type {
@@ -16,6 +24,22 @@ import {
 } from "../../transport/nostr/welcome-delivery.js";
 import { GroupRuntime, type GroupRuntimeOptions } from "../group-runtime.js";
 import { testAccount } from "../../../__tests__/helpers/test-accounts.js";
+import { MemoryAuditSink } from "../../../audit/index.js";
+import { MarmotGroupEngine } from "../../../engine/group-engine.js";
+import { createCredential } from "../../../core/credential.js";
+import { generateKeyPackage } from "../../../core/key-package.js";
+import { createGroup } from "../../../core/group.js";
+import {
+  adminPolicyEntry,
+  groupProfileEntry,
+  nostrRoutingEntry,
+  messageRetentionEntry,
+  encodeMessageRetentionV1,
+  GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+} from "../../../core/components/index.js";
+import { serializeApplicationRumor } from "../../../core/group-message.js";
+import { NostrGroupPeeler } from "../../group/nostr-peeler.js";
+import { createChatRumor } from "../../group/application-message.js";
 import publishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/publish-fail.v1.json";
 import invitePublishFailFixture from "../../../../refs/mdk/crates/cgka-conformance-simulator/vectors/invite-publish-fail.v1.json";
 
@@ -135,6 +159,127 @@ function commitWork(
 }
 
 describe("GroupRuntime publish acknowledgement", () => {
+  it("retries the original signed application after a retention-policy epoch change", async () => {
+    const account = testAccount(6);
+    const ciphersuite = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const kp = await generateKeyPackage({
+      credential: createCredential(account.pubkey),
+      signer: account.signer,
+      ciphersuiteImpl: ciphersuite,
+    });
+    const { clientState: state } = await createGroup({
+      creatorKeyPackage: kp,
+      ciphersuiteImpl: ciphersuite,
+      components: [
+        adminPolicyEntry([account.pubkey]),
+        groupProfileEntry({ name: "retention", description: "" }),
+        nostrRoutingEntry({
+          nostrGroupId: new Uint8Array(32).fill(7),
+          relays: RELAYS,
+        }),
+        messageRetentionEntry(60n),
+      ],
+    });
+    const peeler = new NostrGroupPeeler(ciphersuite);
+    const wrap = vi.spyOn(peeler, "wrapGroupMessage");
+    const engine = new MarmotGroupEngine({ state, ciphersuite, peeler });
+    const sent = await engine.send({
+      kind: "applicationMessage",
+      payload: serializeApplicationRumor(
+        createChatRumor({
+          pubkey: account.pubkey,
+          content: "retry me",
+          created_at: 100,
+        }),
+      ),
+    });
+    if (sent.kind !== "applicationMessage")
+      throw new Error("expected application");
+    expect(sent.envelope.tags.filter((tag) => tag[0] === "expiration")).toEqual(
+      [["expiration", "160"]],
+    );
+    const originalBytes = new TextEncoder().encode(
+      JSON.stringify(sent.envelope),
+    );
+    const publish = vi
+      .fn<NostrNetworkInterface["publish"]>()
+      .mockResolvedValueOnce(noAckResponse())
+      .mockResolvedValueOnce(ackResponse());
+    const audit = new MemoryAuditSink();
+    const { runtime, confirmPublished, publishFailed, save } = makeRuntime({
+      getNetwork: () => makeNetwork(publish),
+      getGroupData: () => getMarmotGroupView(engine.state),
+      audit,
+      auditContext: { engineId: "retention-retry", dataMode: "full_data" },
+    });
+    const work: GroupPublishWork = {
+      kind: "applicationMessage",
+      envelope: sent.envelope,
+    };
+    await expect(runtime.publishWork(work)).rejects.toThrow(
+      /Failed to publish application message/,
+    );
+
+    const update = await engine.send({
+      kind: "commit",
+      actorPubkey: account.pubkey,
+      extraProposals: [
+        {
+          proposalType: appDataUpdateProposalType,
+          appDataUpdate: {
+            componentId: GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+            operation: "update",
+            update: encodeMessageRetentionV1(3600n),
+          },
+        },
+      ],
+    });
+    if (update.kind !== "groupEvolution") throw new Error("expected commit");
+    engine.confirmPublished(update.pending);
+    expect(engine.state.groupContext.epoch).toBe(state.groupContext.epoch + 1n);
+    expect(getMarmotGroupView(engine.state).messageRetention).toBe(3600n);
+    wrap.mockClear();
+
+    const [result] = await runtime.publishEffects({ publish: [work] });
+    expect(result.work).toBe(work);
+    expect(result.retryPublication).toBe(false);
+    expect(publish).toHaveBeenCalledTimes(2);
+    for (const [, published] of publish.mock.calls) {
+      expect(published).toBe(sent.envelope);
+      expect(new TextEncoder().encode(JSON.stringify(published))).toEqual(
+        originalBytes,
+      );
+      expect(published.id).toBe(sent.envelope.id);
+      expect(published.created_at).toBe(sent.envelope.created_at);
+      expect(published.tags.filter((tag) => tag[0] === "expiration")).toEqual([
+        ["expiration", "160"],
+      ]);
+    }
+    expect(wrap).not.toHaveBeenCalled();
+    expect(confirmPublished).not.toHaveBeenCalled();
+    expect(publishFailed).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    const publications = audit.events.filter(({ kind }) =>
+      ["publish_attempt", "publish_outcome", "publish_failure"].includes(
+        kind.type,
+      ),
+    );
+    expect(publications).toHaveLength(5);
+    for (const { kind } of publications) {
+      if (
+        kind.type !== "publish_attempt" &&
+        kind.type !== "publish_outcome" &&
+        kind.type !== "publish_failure"
+      )
+        throw new Error("expected publication audit");
+      expect(kind.msg_id).toBe(sent.envelope.id);
+      expect(kind.transport?.nostr_event_id).toBe(sent.envelope.id);
+    }
+  });
+
   it("confirms and saves a proposal once a relay acks", async () => {
     const { runtime, confirmPublished, publishFailed, save } = makeRuntime();
 
@@ -334,6 +479,118 @@ describe("GroupRuntime publish failure", () => {
 });
 
 describe("GroupRuntime commit rollback", () => {
+  it.each(["proposal", "selfUpdate", "groupEvolution"] as const)(
+    "closure during %s confirmation prevents persistence and success",
+    async (kind) => {
+      let closed = false;
+      const confirmPublished = vi.fn(() => {
+        closed = true;
+        return [];
+      });
+      const { runtime, save, publishFailed } = makeRuntime({
+        confirmPublished,
+        assertOpen: () => {
+          if (closed) throw new Error("Group closed");
+        },
+      });
+      const work =
+        kind === "groupEvolution" ? commitWork() : { kind, envelope, pending };
+      await expect(runtime.publishEffects({ publish: [work] })).rejects.toThrow(
+        "Group closed",
+      );
+      expect(confirmPublished).toHaveBeenCalledOnce();
+      expect(save).not.toHaveBeenCalled();
+      expect(publishFailed).not.toHaveBeenCalled();
+    },
+  );
+  it("refuses a late Welcome delivery result after owner closure", async () => {
+    let closed = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const deliverMany = vi.fn(async () => {
+      await gate;
+      return [];
+    });
+    const { runtime, publishFailed } = makeRuntime({
+      welcomeDelivery: { deliverMany } as unknown as NostrWelcomeDelivery,
+      assertOpen: () => {
+        if (closed) throw new Error("Group closed");
+      },
+    });
+    const operation = runtime.publishEffects({
+      publish: [
+        commitWork({
+          welcome: { welcome: {} as Welcome },
+          welcomeRecipients: [recipient],
+        }),
+      ],
+    });
+    let failure = "";
+    const settled = operation.catch((error) => {
+      failure = String(error);
+    });
+    await vi.waitFor(() => expect(deliverMany).toHaveBeenCalledOnce());
+    closed = true;
+    release();
+    await settled;
+    expect(failure.includes("Group closed")).toBe(true);
+    expect(publishFailed).not.toHaveBeenCalled();
+  });
+  it.each(["proposal", "selfUpdate", "groupEvolution"] as const)(
+    "refuses a late %s persistence completion after owner closure",
+    async (kind) => {
+      let closed = false;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const save = vi.fn(() => gate);
+      const { runtime, confirmPublished } = makeRuntime({
+        save,
+        assertOpen: () => {
+          if (closed) throw new Error("Group closed");
+        },
+      });
+      const work =
+        kind === "groupEvolution" ? commitWork() : { kind, envelope, pending };
+      const operation = runtime.publishEffects({ publish: [work] });
+      let failure = "";
+      const settled = operation.catch((error) => {
+        failure = String(error);
+      });
+      await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+      closed = true;
+      release();
+      await settled;
+      expect(failure.includes("Group closed")).toBe(true);
+      expect(confirmPublished).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("does not confirm or save a late relay acknowledgement after closure", async () => {
+    let closed = false;
+    let release!: (response: Record<string, PublishResponse>) => void;
+    const gate = new Promise<Record<string, PublishResponse>>((resolve) => {
+      release = resolve;
+    });
+    const publish = vi.fn(() => gate);
+    const { runtime, confirmPublished, save } = makeRuntime({
+      getNetwork: () => makeNetwork(publish),
+      assertOpen: () => {
+        if (closed) throw new Error("Group closed");
+      },
+    });
+    const operation = runtime.publishEffects({ publish: [commitWork()] });
+    const rejected = expect(operation).rejects.toThrow("Group closed");
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce());
+    closed = true;
+    release(ackResponse());
+    await rejected;
+    expect(confirmPublished).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
   it("returns a confirmed failure result when confirmation bookkeeping throws", async () => {
     let lifecycle = "PendingPublish";
     const confirmPublished = vi.fn(() => {
@@ -495,7 +752,9 @@ describe("GroupRuntime Welcome delivery", () => {
     // A minimal, real `Welcome` object shaped like the one in
     // welcome-delivery.test.ts; NostrWelcomeDelivery only encodes it into a
     // rumor's content — it does not need to be cryptographically joinable.
-    const cr02Welcome = {
+    const cr02Welcome: MlsWelcomeMessage = {
+      version: protocolVersions.mls10,
+      wireformat: wireformats.mls_welcome,
       welcome: {
         cipherSuite: 1,
         secrets: [],

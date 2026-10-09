@@ -63,6 +63,12 @@ export type PeeledMessagePair<TEnvelope> = {
   message: MlsMessage;
 };
 
+/** Optional application metadata pinned to authenticated plaintext/source epoch. */
+export type GroupMessageWrapMetadata = {
+  /** Exact checked-u64 Unix expiry; absent for disabled or undefined expiry. */
+  readonly expiration?: bigint;
+};
+
 /** Crypto boundary between the engine and transport-specific wrapping. */
 export interface GroupPeeler<TEnvelope> {
   peelGroupMessages(
@@ -73,7 +79,11 @@ export interface GroupPeeler<TEnvelope> {
     unreadable: TEnvelope[];
   }>;
 
-  wrapGroupMessage(message: MlsMessage, state: ClientState): Promise<TEnvelope>;
+  wrapGroupMessage(
+    message: MlsMessage,
+    state: ClientState,
+    metadata?: GroupMessageWrapMetadata,
+  ): Promise<TEnvelope>;
 
   /** A stable transport id for an envelope (used to key the ingestion pool). */
   idOf(envelope: TEnvelope): string;
@@ -117,6 +127,13 @@ export type ProposalAction<T extends Proposal | Proposal[]> = (
   context: ProposalContext,
 ) => Promise<T>;
 
+/** Ordered commit inputs; each builder resolves to one or several proposals. */
+export type CommitProposalInput =
+  Proposal | ProposalAction<Proposal | Proposal[]>;
+export type CommitProposalInputs = (
+  CommitProposalInput | CommitProposalInput[]
+)[];
+
 /** Application intent when calling {@link MarmotGroupEngine.send}. */
 export type SendIntent =
   | { kind: "applicationMessage"; payload: Uint8Array }
@@ -124,11 +141,7 @@ export type SendIntent =
   | {
       kind: "commit";
       actorPubkey: string;
-      extraProposals?: (
-        | Proposal
-        | ProposalAction<Proposal>
-        | (Proposal | ProposalAction<Proposal>)[]
-      )[];
+      extraProposals?: CommitProposalInputs;
       proposalRefs?: string[];
     }
   | { kind: "selfUpdate" }
@@ -152,11 +165,7 @@ export type SendIntent =
        */
       kind: "foundingAdd";
       actorPubkey: string;
-      extraProposals: (
-        | Proposal
-        | ProposalAction<Proposal>
-        | (Proposal | ProposalAction<Proposal>)[]
-      )[];
+      extraProposals: CommitProposalInputs;
     };
 
 /** Engine response to {@link MarmotGroupEngine.send}. */
@@ -340,6 +349,10 @@ export type InvalidatedIngestResult<TEnvelope> = {
   tag?: string;
   /** MLS epoch of that fork node. */
   epoch?: number;
+  /** Producing losing-state edge, never the triggering/winning commit. */
+  commitDigest?: Uint8Array;
+  transportId?: string;
+  rumorId?: string;
 };
 
 /**

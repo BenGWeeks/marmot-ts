@@ -1,4 +1,5 @@
 /** @module @category Client - Marmot Client */
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRumor, Rumor } from "applesauce-common/helpers/gift-wrap";
 import { EventSigner } from "applesauce-core";
 import {
@@ -129,10 +130,11 @@ export type MarmotClientOptions<
   removedMarkerStore?: GenericKeyValueStore<boolean>;
   /**
    * Convergence policy applied to every group: branch selection and the
-   * `maxRewindCommits` rollback horizon. Set `maxRewindCommits: Infinity` to
-   * preserve the whole MLS history and keep forks of any age eligible for
-   * re-convergence. Defaults to the profile-1 policy
-   * ({@link DEFAULT_CONVERGENCE_POLICY}).
+   * `maxRewindCommits` rollback horizon. Keep the finite profile-1 default
+   * ({@link DEFAULT_CONVERGENCE_POLICY}) for production. `Infinity` is an
+   * explicit debugging/forensics choice that keeps arbitrarily old forks
+   * eligible and can retain unbounded evidence; the horizon does not guarantee
+   * pruning of every full-history tree record.
    */
   convergencePolicy?: ConvergencePolicy;
   /**
@@ -168,8 +170,8 @@ export type MarmotClientOptions<
   /**
    * Default `d` tag value (slot identifier) for key package events.
    * Used by {@link KeyPackageManager.create} when no explicit `d` is passed.
-   * Set this to a stable per-device string (e.g. `"my-app-desktop"`) so all
-   * key packages from this client share a single addressable slot on relays.
+   * Generate 32 random bytes once and persist their 64-character lowercase hex
+   * encoding so key packages share a stable addressable slot on relays.
    */
   clientId?: string;
 } & (THistory extends undefined
@@ -226,6 +228,8 @@ export class MarmotClient<
       network: options.network,
       clientId: options.clientId,
       verifyEvent,
+      hasAdoptedGroup: async (groupId) =>
+        (await options.groupStateStore.getItem(bytesToHex(groupId))) !== null,
     });
 
     const historyFactory = (
@@ -394,7 +398,8 @@ export class MarmotClient<
    * 2. Finds the matching local KeyPackage private material from the store
    * 3. Calls ts-mls joinGroup() to create a new ClientState
    * 4. Persists the resulting ClientState via `this.groups.adoptClientState()`
-   * 5. Marks the consumed key package as used via `this.keyPackages.markUsed()`
+   * 5. Finalizes a durable consumption receipt: retires single-use private
+   *    material and retains reusable packages marked as used
    * 6. Returns a MarmotGroup instance
    *
    * After joining, callers can list used key packages with
@@ -424,19 +429,19 @@ export class MarmotClient<
     // layer; the MLS join + leaf-proof validation + persistence live in the
     // group layer — mirroring darkmatter's engine `do_join_welcome` rather than
     // doing protocol matching here in the composition root.
+    await this.keyPackages.finalizeConsumptions();
     const candidates = await this.keyPackages.selectForWelcome(welcome);
     const { group, consumedKeyPackageRef } = await this.groups.joinFromWelcome({
       welcome,
       candidates,
       ciphersuiteImpl,
+      beforeAdopt: (groupId, ref) =>
+        this.keyPackages.recordConsumption(groupId, ref),
     });
 
-    // Mark the consumed key package as used. Callers can later list used packages
-    // with (await client.keyPackages.list()).filter(p => p.used) and rotate them
-    // via client.keyPackages.rotate(ref) to publish fresh ones to relays.
-    if (consumedKeyPackageRef) {
-      await this.keyPackages.markUsed(consumedKeyPackageRef);
-    }
+    // Receipt retirement follows durable group adoption. A crash between stores
+    // delays cleanup until manager startup/retry; it never consumes rejected keys.
+    if (consumedKeyPackageRef) await this.keyPackages.finalizeConsumptions();
 
     log("joined group %s", group.idStr);
 

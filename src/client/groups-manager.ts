@@ -1,3 +1,4 @@
+import { isReusableKeyPackage } from "../core/key-package.js";
 /** @module @category Client - Group Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { EventSigner } from "applesauce-core";
@@ -8,7 +9,8 @@ import {
   ClientState,
   CryptoProvider,
   defaultCryptoProvider,
-  joinGroup,
+  joinGroupWithExtensions,
+  type GroupInfo,
   Welcome,
 } from "ts-mls";
 import {
@@ -17,11 +19,8 @@ import {
 } from "../core/client-state.js";
 import type { MarmotGroupInfo } from "../core/client-state.js";
 import { GROUP_EVENT_KIND } from "../core/protocol.js";
-import {
-  assertCurrentGroupAccountIdentityProofProfile,
-  validateGroupMemberAccountIdentityProofs,
-} from "../core/components/account-identity-proof.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { validateWelcomeGroup } from "../core/welcome-join.js";
 import type { ConvergencePolicy } from "../core/convergence.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
@@ -40,6 +39,27 @@ import {
   type GroupDisbandedEvent,
 } from "./group/marmot-group.js";
 import { createInviteIntent } from "./group/invite.js";
+import { encryptGroupImage } from "../core/group-image.js";
+import { encodeGroupBlossomImage } from "../core/components/blossom-image.js";
+import { GROUP_BLOSSOM_IMAGE_COMPONENT_ID } from "../core/components/ids.js";
+import { getAdminPolicy } from "../core/components/dictionary.js";
+import { getGroupMemberPubkeys } from "../core/group-members.js";
+import { appDataUpdateProposalType } from "ts-mls";
+import {
+  groupImageEndpoints,
+  groupImageLimit,
+  groupImageUnavailable,
+  requestGroupImage,
+  withGroupImageBudget,
+  type GroupImageProfile,
+  type GroupImageOperationOptions,
+  type GroupImageMutationResult,
+} from "./group/group-image-service.js";
+import {
+  createGroupImageUploadAuthorization,
+  GroupImageRequestError,
+  validateGroupImageUploadResponse,
+} from "./group/group-image-transport.js";
 import type { WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { GroupFactory, type CreateGroupOptions } from "./group-factory.js";
 import { GroupRegistry } from "./group-registry.js";
@@ -98,6 +118,8 @@ const log = logger.extend("GroupsManager");
 
 /** Options for {@link GroupsManager.connect} / {@link GroupsManager.connectAll}. */
 export interface ConnectOptions {
+  /** Stops intake, including a connection still waiting for backfill. */
+  signal?: AbortSignal;
   /**
    * Relays to subscribe on when a group carries no relays of its own. A group
    * with neither its own relays nor a fallback is skipped (it cannot receive,
@@ -147,8 +169,9 @@ export type GroupsManagerOptions<
   mediaFactory?: GroupMediaFactory<TMedia>;
   /**
    * Convergence policy applied to every group (branch selection + the
-   * `maxRewindCommits` rollback horizon). Set `maxRewindCommits: Infinity` to
-   * keep forks of any age eligible for re-convergence. Defaults to profile 1.
+   * `maxRewindCommits` rollback horizon). Keep the finite profile-1 default
+   * for production. `Infinity` is an explicit debugging/forensics choice
+   * that keeps arbitrarily old forks eligible and can retain unbounded evidence.
    */
   convergencePolicy?: ConvergencePolicy;
   /**
@@ -163,6 +186,8 @@ export type GroupsManagerOptions<
    * reaches `group.ingest()`. Defaults to applesauce's `verifyEvent`.
    */
   verifyEvent?: VerifyEventMethod;
+  /** Maximum admitted image mutations per loaded group, including active work. Default 16. */
+  maxPendingImageMutations?: number;
 };
 
 /** Events emitted by {@link GroupsManager} */
@@ -213,6 +238,11 @@ export type GroupsManagerEvents<
     event: NostrEvent,
     reason: RejectReason,
   ) => void;
+  /** Every connected group result, including timer-driven invalidations, once. */
+  ingestResult: (
+    groupId: Uint8Array,
+    result: DispositionedIngestResult,
+  ) => void;
 };
 
 /**
@@ -238,6 +268,27 @@ export class GroupsManager<
 
   /** Owns the in-memory cache + store hydration. */
   readonly #registry: GroupRegistry<THistory, TMedia>;
+  readonly #adoptions = new Map<string, Promise<void>>();
+  readonly #maxPendingImageMutations: number;
+  readonly #imageMutations = new Map<
+    string,
+    {
+      group: Promise<MarmotGroup<THistory, TMedia>>;
+      instance?: MarmotGroup<THistory, TMedia>;
+      tail: Promise<unknown>;
+      pending: number;
+    }
+  >();
+  readonly #admissions = new Map<
+    string,
+    {
+      tail: Promise<void>;
+      seen: BoundedIdCache;
+      connections: number;
+      pending: number;
+      cleanup: () => void;
+    }
+  >();
   /** Builds new groups (the identity-signer/ciphersuite consumer). */
   readonly #factory: GroupFactory<THistory, TMedia>;
   /** The injectable event verifier gating the 445 drain (SEC-01). */
@@ -245,6 +296,12 @@ export class GroupsManager<
 
   constructor(options: GroupsManagerOptions<THistory, TMedia>) {
     super();
+    const capacity = options.maxPendingImageMutations ?? 16;
+    if (!Number.isSafeInteger(capacity) || capacity < 1)
+      throw new Error(
+        "Image mutation capacity must be a finite positive integer",
+      );
+    this.#maxPendingImageMutations = capacity;
     this.store = options.store;
     this.ingestPersistence = options.ingestPersistence;
     this.signer = options.signer;
@@ -321,6 +378,319 @@ export class GroupsManager<
   /** Returns the protocol session for a loaded or persisted group. */
   async session(groupId: Uint8Array | string): Promise<GroupSession<THistory>> {
     return (await this.get(groupId)).session;
+  }
+
+  /** Upload opaque encrypted bytes, then submit guarded metadata through MLS. */
+  replaceGroupImage(
+    groupId: Uint8Array | string,
+    bytes: Uint8Array,
+    mediaType: string,
+    profile: GroupImageProfile,
+    options: GroupImageOperationOptions = {},
+  ): Promise<GroupImageMutationResult> {
+    if (
+      bytes.length > groupImageLimit(profile.maxUploadBytes, 10 * 1024 * 1024)
+    )
+      return Promise.resolve({ kind: "unavailable", reason: "byte-limit" });
+    profile = { ...profile, endpoints: profile.endpoints?.slice() };
+    options = { ...options };
+    return this.#mutateImage(
+      groupId,
+      async (group, actorPubkey, owned, mutationSignal) => {
+        const expectedParent = group.session.parentToken;
+        if (
+          owned!.length >
+          groupImageLimit(profile.maxUploadBytes, 10 * 1024 * 1024)
+        )
+          return { kind: "unavailable", reason: "byte-limit" };
+        const encrypted = encryptGroupImage(owned!, mediaType);
+        try {
+          await withGroupImageBudget(
+            profile,
+            { signal: mutationSignal },
+            async (signal) => {
+              const endpoints = await groupImageEndpoints(
+                profile,
+                group.image.source(),
+                signal,
+              );
+              const endpoint = endpoints[0]!;
+              const hash = bytesToHex(encrypted.metadata.imageHash);
+              const response = await requestGroupImage(
+                profile,
+                {
+                  url: `${endpoint}/upload`,
+                  method: "PUT",
+                  headers: {
+                    "Content-Type": "application/octet-stream",
+                    "X-SHA-256": hash,
+                    Authorization: createGroupImageUploadAuthorization(
+                      endpoint,
+                      encrypted.metadata,
+                    ),
+                  },
+                  body: encrypted.ciphertext,
+                  maxBytes: groupImageLimit(
+                    profile.maxDescriptorBytes,
+                    16 * 1024,
+                  ),
+                },
+                { signal },
+              );
+              validateGroupImageUploadResponse(
+                response,
+                endpoint,
+                hash,
+                encrypted.ciphertext.length,
+              );
+            },
+          );
+        } catch (error) {
+          if (group.closedSignal.aborted || group.image.closedSignal.aborted)
+            return { kind: "unavailable", reason: "closed" };
+          return groupImageUnavailable(error);
+        }
+        if (options.signal?.aborted)
+          return { kind: "unavailable", reason: "cancelled" };
+        const currentActor = await this.#imageActor(group, mutationSignal);
+        if (currentActor !== actorPubkey)
+          throw new Error("Group image actor changed before preparation");
+        this.#assertImageMutation(group, actorPubkey, expectedParent);
+        if (options.signal?.aborted)
+          return { kind: "unavailable", reason: "cancelled" };
+        const publications = await group.submitIntent({
+          kind: "commit",
+          actorPubkey,
+          expectedParent,
+          signal: mutationSignal,
+          extraProposals: [
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                operation: "update",
+                update: encodeGroupBlossomImage(encrypted.metadata),
+              },
+            },
+          ],
+        });
+        return {
+          kind: "published",
+          publications,
+        };
+      },
+      bytes,
+      options,
+    );
+  }
+
+  /** Clear canonical Blossom metadata; URL avatars and remote blobs remain. */
+  clearGroupImage(
+    groupId: Uint8Array | string,
+    options: GroupImageOperationOptions = {},
+  ): Promise<GroupImageMutationResult> {
+    return this.#mutateImage(
+      groupId,
+      async (group, actorPubkey, _owned, signal) => ({
+        kind: "published",
+        publications: await group.submitIntent({
+          kind: "commit",
+          actorPubkey,
+          expectedParent: group.session.parentToken,
+          signal,
+          extraProposals: [
+            {
+              proposalType: appDataUpdateProposalType,
+              appDataUpdate: {
+                componentId: GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+                operation: "update",
+                update: encodeGroupBlossomImage({ kind: "empty" }),
+              },
+            },
+          ],
+        }),
+      }),
+      undefined,
+      options,
+    );
+  }
+
+  #mutateImage(
+    groupId: Uint8Array | string,
+    operation: (
+      group: MarmotGroup<THistory, TMedia>,
+      actorPubkey: string,
+      owned: Uint8Array | undefined,
+      signal: AbortSignal,
+    ) => Promise<GroupImageMutationResult>,
+    bytes?: Uint8Array,
+    options: GroupImageOperationOptions = {},
+  ): Promise<GroupImageMutationResult> {
+    const id = typeof groupId === "string" ? groupId : bytesToHex(groupId);
+    const loaded = this.loaded.find((group) => group.idStr === id);
+    let queue = this.#imageMutations.get(id);
+    if (!queue || (loaded && queue.instance && queue.instance !== loaded)) {
+      queue = {
+        group: loaded ? Promise.resolve(loaded) : this.get(id),
+        instance: loaded,
+        tail: Promise.resolve(),
+        pending: 0,
+      };
+      this.#imageMutations.set(id, queue);
+    }
+    if (queue.pending >= this.#maxPendingImageMutations)
+      return Promise.resolve({ kind: "unavailable", reason: "byte-limit" });
+    const owned = bytes?.slice();
+    queue.pending++;
+    const admitted = queue;
+    const controller = new AbortController();
+    let completed = false;
+    const signals: AbortSignal[] = [];
+    const abort = () => {
+      const closed =
+        admitted.instance &&
+        (admitted.instance.closedSignal.aborted ||
+          admitted.instance.image.closedSignal.aborted);
+      controller.abort(
+        closed
+          ? new Error("Group unloaded; image mutation cancelled")
+          : new GroupImageRequestError("cancelled"),
+      );
+    };
+    const observe = (signal: AbortSignal) => {
+      signals.push(signal);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    };
+    if (options.signal) observe(options.signal);
+    // Observe the admitted instance immediately, even while waiting in the
+    // manager FIFO. Closing an image service releases every waiting caller.
+    const groupReady = admitted.group.then((group) => {
+      admitted.instance = group;
+      if (completed) return group;
+      observe(group.closedSignal);
+      observe(group.image.closedSignal);
+      return group;
+    });
+    void groupReady.catch(() => undefined);
+    let rejectAdmission: (() => void) | undefined;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      rejectAdmission = () => reject(controller.signal.reason);
+      controller.signal.addEventListener("abort", rejectAdmission, {
+        once: true,
+      });
+      if (controller.signal.aborted) rejectAdmission();
+    });
+    const queued = admitted.tail
+      .catch(() => undefined)
+      .then(async () => {
+        const group = await groupReady;
+        controller.signal.throwIfAborted();
+        this.#assertImageOwnerOpen(group);
+        const actorPubkey = await this.#imageActor(group, controller.signal);
+        controller.signal.throwIfAborted();
+        this.#assertImageMutation(group, actorPubkey);
+        // Preparation handles cancellation from here. Once transport starts,
+        // return its publication outcome even if image closure arrives later.
+        controller.signal.removeEventListener("abort", rejectAdmission!);
+        return operation(group, actorPubkey, owned, controller.signal);
+      });
+    const result = Promise.race([queued, interrupted])
+      .catch((error) => {
+        if (error instanceof GroupImageRequestError)
+          return groupImageUnavailable(error);
+        throw error;
+      })
+      .finally(() => {
+        completed = true;
+        controller.signal.removeEventListener("abort", rejectAdmission!);
+        for (const signal of signals)
+          signal.removeEventListener("abort", abort);
+        owned?.fill(0);
+        admitted.pending--;
+        if (admitted.pending === 0 && this.#imageMutations.get(id) === admitted)
+          this.#imageMutations.delete(id);
+      });
+    // A waiting caller may cancel promptly without letting later FIFO work
+    // overtake the operation that was ahead of it.
+    admitted.tail = queued;
+    void result.catch(() => undefined);
+    return result;
+  }
+
+  #assertImageOwnerOpen(group: MarmotGroup<THistory, TMedia>): void {
+    if (
+      !this.loaded.includes(group) ||
+      group.closedSignal.aborted ||
+      group.image.closedSignal.aborted
+    )
+      throw new Error("Group unloaded; image mutation cancelled");
+    group.session.assertOpen();
+  }
+
+  async #imageActor(
+    group: MarmotGroup<THistory, TMedia>,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    this.#assertImageOwnerOpen(group);
+    signal?.throwIfAborted();
+    const signals = [group.closedSignal, group.image.closedSignal];
+    let abort!: () => void;
+    const closed = new Promise<never>((_resolve, reject) => {
+      abort = () =>
+        reject(
+          signal?.aborted
+            ? signal.reason
+            : new Error("Group unloaded; image mutation cancelled"),
+        );
+      signal?.addEventListener("abort", abort, { once: true });
+      for (const signal of signals)
+        signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => {
+          this.#assertImageOwnerOpen(group);
+          signal?.throwIfAborted();
+          return this.signer.getPublicKey();
+        }),
+        closed,
+      ]);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      for (const signal of signals) signal.removeEventListener("abort", abort);
+    }
+  }
+
+  #assertImageMutation(
+    group: MarmotGroup<THistory, TMedia>,
+    actorPubkey: string,
+    expectedParent?: string,
+  ): void {
+    this.#assertImageOwnerOpen(group);
+    if (
+      group.status !== "active" ||
+      !getAdminPolicy(group.state.groupContext.extensions)?.includes(
+        actorPubkey,
+      ) ||
+      !getGroupMemberPubkeys(group.state).includes(actorPubkey)
+    )
+      throw new Error(
+        "Only an active group admin can change the Blossom image",
+      );
+    if (group.profileSupport.kind !== "supported")
+      throw new Error(
+        "Group image mutation requires a supported group profile",
+      );
+    if (group.session.terminalTombstone || group.lifecycle !== "Stable")
+      throw new Error(
+        "Group image mutation requires a stable active lifecycle",
+      );
+    if (
+      expectedParent !== undefined &&
+      expectedParent !== group.session.parentToken
+    )
+      throw new Error("Group canonical parent changed before preparation");
   }
 
   /** Returns the runtime publisher for a loaded or persisted group. */
@@ -401,6 +771,8 @@ export class GroupsManager<
       kind: "commit",
       actorPubkey,
       extraProposals: options?.extraProposals,
+      expectedParent: options?.expectedParent,
+      signal: options?.signal,
       proposalRefs: options?.proposalRefs,
       welcomeRecipients: options?.welcomeRecipients,
     });
@@ -451,23 +823,27 @@ export class GroupsManager<
   connectAll(options?: ConnectOptions): Unsubscribable {
     const records = new Map<
       string,
-      { cancelled: boolean; sub?: Unsubscribable }
+      { controller: AbortController; sub?: Unsubscribable }
     >();
 
     const connect = (group: MarmotGroup<THistory, TMedia>) => {
       if (records.has(group.idStr)) return;
-      const record: { cancelled: boolean; sub?: Unsubscribable } = {
-        cancelled: false,
+      if (options?.signal?.aborted) return;
+      const record: { controller: AbortController; sub?: Unsubscribable } = {
+        controller: new AbortController(),
       };
       records.set(group.idStr, record);
-      void this.#connectGroup(group, options)
+      void this.#connectGroup(group, {
+        ...options,
+        signal: record.controller.signal,
+      })
         .then((sub) => {
-          if (record.cancelled) sub.unsubscribe();
+          if (record.controller.signal.aborted) sub.unsubscribe();
           else record.sub = sub;
         })
         .catch((err) => {
           log("connectAll: failed to connect %s: %o", group.idStr, err);
-          records.delete(group.idStr);
+          if (records.get(group.idStr) === record) records.delete(group.idStr);
         });
     };
 
@@ -475,7 +851,7 @@ export class GroupsManager<
       const hex = bytesToHex(groupId);
       const record = records.get(hex);
       if (!record) return;
-      record.cancelled = true;
+      record.controller.abort();
       record.sub?.unsubscribe();
       records.delete(hex);
     };
@@ -492,24 +868,26 @@ export class GroupsManager<
     this.on("removed", disconnect);
     this.on("disbanded", disconnect);
 
-    return {
-      unsubscribe: () => {
-        this.off("created", connect);
-        this.off("joined", connect);
-        this.off("imported", connect);
-        this.off("loaded", connect);
-        this.off("destroyed", disconnect);
-        this.off("left", disconnect);
-        this.off("unloaded", disconnect);
-        this.off("removed", disconnect);
-        this.off("disbanded", disconnect);
-        for (const record of records.values()) {
-          record.cancelled = true;
-          record.sub?.unsubscribe();
-        }
-        records.clear();
-      },
+    const unsubscribe = () => {
+      options?.signal?.removeEventListener("abort", unsubscribe);
+      this.off("created", connect);
+      this.off("joined", connect);
+      this.off("imported", connect);
+      this.off("loaded", connect);
+      this.off("destroyed", disconnect);
+      this.off("left", disconnect);
+      this.off("unloaded", disconnect);
+      this.off("removed", disconnect);
+      this.off("disbanded", disconnect);
+      for (const record of records.values()) {
+        record.controller.abort();
+        record.sub?.unsubscribe();
+      }
+      records.clear();
     };
+    options?.signal?.addEventListener("abort", unsubscribe, { once: true });
+    if (options?.signal?.aborted) unsubscribe();
+    return { unsubscribe };
   }
 
   /** Backfill + live-subscribe a single group instance to its transport events. */
@@ -518,7 +896,11 @@ export class GroupsManager<
     options?: ConnectOptions,
   ): Promise<Unsubscribable> {
     const noop: Unsubscribable = { unsubscribe: () => {} };
-    if (group.status === "removed" || group.status === "disbanded") {
+    if (
+      options?.signal?.aborted ||
+      group.status === "removed" ||
+      group.status === "disbanded"
+    ) {
       log("connect: group %s is %s — skipping", group.idStr, group.status);
       return noop;
     }
@@ -543,28 +925,60 @@ export class GroupsManager<
     // dedup slot, or a corrupted same-id forgery could poison it and censor
     // the genuine, validly-signed event arriving later. `seen.add` MUST stay
     // strictly after both trust gates below — never add a rejected event's id
-    // here (T-03-24). Rejected ids have a separate bounded cache, consulted
-    // only after the current event fails validation, so a valid same-id event
-    // can never be censored by an earlier forgery.
-    const seen = new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY);
-    const rejected = new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY);
+    // here (T-03-24), so a valid same-id event can never be censored by forgery.
+    let admission = this.#admissions.get(group.idStr);
+    if (!admission) {
+      const forward = (result: DispositionedIngestResult) => {
+        if (result.kind === "unreadable")
+          this.emit("unreadable", group.id, result.event);
+        this.emit("ingestResult", group.id, result);
+      };
+      group.on("ingestResult", forward);
+      admission = {
+        tail: Promise.resolve(),
+        seen: new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY),
+        connections: 0,
+        pending: 0,
+        cleanup: () => group.off("ingestResult", forward),
+      };
+      this.#admissions.set(group.idStr, admission);
+    }
+    const record = admission;
+    record.connections++;
+    const cleanup = () => {
+      if (record.connections || record.pending) return;
+      record.cleanup();
+      if (this.#admissions.get(group.idStr) === record)
+        this.#admissions.delete(group.idStr);
+    };
+    let cancelled = false;
+    let sub: Unsubscribable | undefined;
+    const unsubscribe = () => {
+      if (cancelled) return;
+      cancelled = true;
+      options?.signal?.removeEventListener("abort", unsubscribe);
+      group.off("disbanded", unsubscribe);
+      sub?.unsubscribe();
+      record.connections--;
+      cleanup();
+    };
+    options?.signal?.addEventListener("abort", unsubscribe, { once: true });
+    group.once("disbanded", unsubscribe);
+    const seen = record.seen;
     const drain = async (events: NostrEvent[]): Promise<void> => {
       const fresh = events.filter((event) => !seen.has(event.id));
       if (!fresh.length) return;
 
       // Trust boundary (SEC-01/WIRE-02): verify signature and `h` tag
       // cardinality BEFORE any event reaches group.ingest() or occupies the
-      // dedup `seen` slot. Not a cross-check of the `h` value against the
-      // subscribed group id — that is out of scope (RESEARCH Open Question 1).
+      // dedup `seen` slot. The singleton must match this group's routing id.
       const trusted: NostrEvent[] = [];
       for (const event of fresh) {
         if (!safeVerifyEvent(this.#verifyEvent, event)) {
-          rejected.add(event.id);
           this.emit("rejected", group.id, event, "invalid-signature");
           continue;
         }
         if (getSingletonTagValue(event, "h") !== h) {
-          rejected.add(event.id);
           this.emit("rejected", group.id, event, "tag-cardinality");
           continue;
         }
@@ -573,36 +987,48 @@ export class GroupsManager<
       }
       if (!trusted.length) return;
 
-      try {
-        for await (const result of group.ingest(trusted)) {
-          if (result.kind === "unreadable")
-            this.emit("unreadable", group.id, result.event);
-        }
-      } catch (err) {
-        log("connect: ingest failed for group %s: %o", group.idStr, err);
-      }
+      // Result delivery uses the facade event only; consuming yields as well
+      // would duplicate live results and still miss timer-driven results.
+      for await (const result of group.ingest(trusted)) void result;
+    };
+    const admit = (events: NostrEvent[]) => {
+      if (cancelled) return Promise.resolve();
+      record.pending++;
+      const work = record.tail
+        .then(() => drain(events))
+        .catch((err) => {
+          log("connect: ingest failed for group %s: %o", group.idStr, err);
+        })
+        .finally(() => {
+          record.pending--;
+          cleanup();
+        });
+      record.tail = work;
+      return work;
     };
 
     // Backfill before subscribing (mirrors the proven attach order): the backlog
     // ingests as one batch so out-of-order commits resolve together.
-    await drain(await this.network.request(relays, filter));
+    try {
+      await admit(await this.network.request(relays, filter));
 
-    // Backfill may itself have selected terminal state. Never seed a live route
-    // after the durable tombstone has won.
-    if (group.session.terminalTombstone) return noop;
+      // Backfill may itself have selected terminal state. Never seed a live route
+      // after the durable tombstone has won.
+      if (cancelled || group.session.terminalTombstone) {
+        unsubscribe();
+        return noop;
+      }
 
-    const sub = this.network
-      .subscription(relays, filter)
-      .subscribe({ next: (event) => void drain([event]) });
-    const disbanded = () => sub.unsubscribe();
-    group.once("disbanded", disbanded);
-
-    return {
-      unsubscribe: () => {
-        group.off("disbanded", disbanded, undefined, true);
-        sub.unsubscribe();
-      },
-    };
+      const installed = this.network
+        .subscription(relays, filter)
+        .subscribe({ next: (event) => void admit([event]) });
+      sub = installed;
+      if (cancelled) installed.unsubscribe();
+      return { unsubscribe };
+    } catch (error) {
+      unsubscribe();
+      throw error;
+    }
   }
 
   /**
@@ -619,26 +1045,40 @@ export class GroupsManager<
     options?: {
       /** Which lifecycle event to emit. Defaults to `"imported"`. */
       emit?: "imported" | "joined";
+      /** Runs after duplicate rejection while adoption for this group is serialized. */
+      beforeAdopt?: () => Promise<void>;
     },
   ): Promise<MarmotGroup<THistory, TMedia>> {
     const eventName = options?.emit ?? "imported";
     const id = bytesToHex(state.groupContext.groupId);
+    const previous = this.#adoptions.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#adoptions.set(id, gate);
+    await previous;
+    try {
+      if (await this.#registry.has(state.groupContext.groupId)) {
+        throw new Error(`Group ${id} already exists`);
+      }
+      await options?.beforeAdopt?.();
 
-    if (await this.#registry.has(state.groupContext.groupId)) {
-      throw new Error(`Group ${id} already exists`);
+      const group = await this.#registry.build(state);
+
+      // Persist initial state via the group's own save() path.
+      // MarmotGroup.save() is the single writer into the group state store.
+      await group.save(true);
+
+      await this.#registry.track(group);
+      this.emit(eventName, group);
+      log("adopted group %s (emit=%s)", id, eventName);
+
+      return group;
+    } finally {
+      release();
+      if (this.#adoptions.get(id) === gate) this.#adoptions.delete(id);
     }
-
-    const group = await this.#registry.build(state);
-
-    // Persist initial state via the group's own save() path.
-    // MarmotGroup.save() is the single writer into the group state store.
-    await group.save(true);
-
-    await this.#registry.track(group);
-    this.emit(eventName, group);
-    log("adopted group %s (emit=%s)", id, eventName);
-
-    return group;
   }
 
   /**
@@ -669,6 +1109,11 @@ export class GroupsManager<
     welcome: Welcome;
     candidates: WelcomeKeyPackageCandidate[];
     ciphersuiteImpl: CiphersuiteImpl;
+    /** Records durable cleanup intent only after validation and duplicate rejection. */
+    beforeAdopt?: (
+      groupId: Uint8Array,
+      keyPackageRef: Uint8Array,
+    ) => Promise<void>;
   }): Promise<{
     group: MarmotGroup<THistory, TMedia>;
     consumedKeyPackageRef: Uint8Array | null;
@@ -682,12 +1127,14 @@ export class GroupsManager<
     }
 
     let clientState: ClientState | null = null;
+    let groupInfo: GroupInfo | null = null;
     let lastError: Error | null = null;
     let consumedKeyPackageRef: Uint8Array | null = null;
 
     for (const candidate of candidates) {
       try {
-        clientState = await joinGroup({
+        isReusableKeyPackage(candidate.publicPackage);
+        const joined = await joinGroupWithExtensions({
           context: {
             cipherSuite: ciphersuiteImpl,
             authService: marmotAuthService,
@@ -697,6 +1144,8 @@ export class GroupsManager<
           keyPackage: candidate.publicPackage,
           privateKeys: candidate.privatePackage,
         });
+        clientState = joined.state;
+        groupInfo = joined.groupInfo;
         consumedKeyPackageRef = candidate.keyPackageRef;
         break;
       } catch (error) {
@@ -712,21 +1161,16 @@ export class GroupsManager<
       );
     }
 
-    // The joined GroupContext must classify as the current 0x8009 profile
-    // (not legacy, mixed, or neither), and every member leaf's proof must
-    // validate against the group ciphersuite — both checked before
-    // adoptClientState, so a rejecting group persists nothing
-    // (refs/marmot/app-components/account-identity-proof-v2.md "Migration
-    // from v1").
-    assertCurrentGroupAccountIdentityProofProfile(
-      clientState.groupContext.extensions,
-    );
-    validateGroupMemberAccountIdentityProofs(
-      clientState,
-      clientState.groupContext.cipherSuite,
-    );
-
-    const group = await this.adoptClientState(clientState, { emit: "joined" });
+    // Full tentative validation precedes the serialized persistence boundary.
+    validateWelcomeGroup(clientState, groupInfo!);
+    const ref = consumedKeyPackageRef;
+    const group = await this.adoptClientState(clientState, {
+      emit: "joined",
+      beforeAdopt: async () => {
+        if (ref)
+          await options.beforeAdopt?.(clientState.groupContext.groupId, ref);
+      },
+    });
     return { group, consumedKeyPackageRef };
   }
 
@@ -823,34 +1267,98 @@ export class GroupsManager<
    * Returns an async generator that yields the current list of groups
    * whenever the store changes.
    */
-  async *watch(): AsyncGenerator<MarmotGroup<THistory, TMedia>[]> {
-    let resolveNext: (() => void) | null = null;
-
-    const handleChange = () => {
-      if (resolveNext) {
-        resolveNext();
-        resolveNext = null;
-      }
+  watch(options?: {
+    signal?: AbortSignal;
+  }): AsyncGenerator<MarmotGroup<THistory, TMedia>[]> {
+    const manager = this;
+    const signal = options?.signal;
+    let cancelled = false;
+    let listening = false;
+    let version = 0;
+    let wake: (() => void) | undefined;
+    let cancelLoad: (() => void) | undefined;
+    const changed = () => {
+      version++;
+      wake?.();
+      wake = undefined;
     };
-
-    // `updated` fires whenever the set of loaded groups changes
-    // (create, import, join, load, unload, destroy, leave).
-    this.on("updated", handleChange);
-
-    try {
-      // Yield initial state after listeners are installed to avoid missing updates
-      // that occur between snapshot and subscription.
-      yield [...(await this.loadAll())];
-
-      while (true) {
-        await new Promise<void>((resolve) => {
-          resolveNext = resolve;
-        });
-
-        yield [...(await this.loadAll())];
+    const cleanup = () => {
+      if (!listening) return;
+      listening = false;
+      manager.off("updated", changed);
+      signal?.removeEventListener("abort", cancel);
+    };
+    const cancel = () => {
+      cancelled = true;
+      cleanup();
+      cancelLoad?.();
+      cancelLoad = undefined;
+      wake?.();
+      wake = undefined;
+    };
+    const iterator = (async function* (): AsyncGenerator<
+      MarmotGroup<THistory, TMedia>[]
+    > {
+      if (cancelled || signal?.aborted) return;
+      listening = true;
+      manager.on("updated", changed);
+      signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        // Capture the change version before loading. An update during the load
+        // or between yields remains pending, even when there is no idle waiter.
+        let yieldedVersion = -1;
+        while (!cancelled) {
+          if (yieldedVersion === version) {
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+          }
+          if (cancelled) return;
+          const snapshotVersion = version;
+          // Cancellation must also wake a load waiting on storage, without
+          // leaving its eventual rejection unhandled.
+          const snapshot = await new Promise<
+            MarmotGroup<THistory, TMedia>[] | undefined
+          >((resolve, reject) => {
+            cancelLoad = () => resolve(undefined);
+            manager.loadAll().then(
+              (groups) => {
+                cancelLoad = undefined;
+                resolve(groups);
+              },
+              (error) => {
+                cancelLoad = undefined;
+                reject(error);
+              },
+            );
+          });
+          if (cancelled || signal?.aborted || snapshot === undefined) return;
+          yieldedVersion = snapshotVersion;
+          yield [...snapshot];
+        }
+      } finally {
+        cancel();
       }
-    } finally {
-      this.off("updated", handleChange);
-    }
+    })();
+    // Native generator return queues behind an outstanding next. Wake that
+    // next first, then let the generator perform normal completion/error flow.
+    return {
+      next: (...args) => iterator.next(...args),
+      return: (value) => {
+        cancel();
+        return iterator.return(value);
+      },
+      throw: (error) => {
+        cancel();
+        return iterator.throw(error);
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+      async [Symbol.asyncDispose]() {
+        cancel();
+        await iterator.return(undefined);
+      },
+    };
   }
 }

@@ -40,6 +40,7 @@ import {
   defaultCryptoProvider,
   defaultProposalTypes,
   getCiphersuiteImpl,
+  type Proposal,
 } from "ts-mls";
 import { describe, expect, it } from "vitest";
 
@@ -54,7 +55,9 @@ import {
 import { generateKeyPackage } from "../../core/key-package.js";
 import { proposeInviteUser } from "../../client/group/proposals/invite-user.js";
 import { CommitLegalityError, MarmotGroupEngine } from "../group-engine.js";
-import type { GroupPeeler } from "../types.js";
+import type { GroupPeeler, ProposalContext, SendIntent } from "../types.js";
+import type { GroupSessionSendIntent } from "../../client/session/group-effects.js";
+import { framedCommitProposals } from "../wire-format.js";
 
 /** A real crypto-backed peeler that also counts `wrapGroupMessage` calls (FOUND-01). */
 function countingPeeler(ciphersuite: CiphersuiteImpl): {
@@ -117,6 +120,99 @@ async function inviteeKeyPackage(slot: number, impl: CiphersuiteImpl) {
 }
 
 describe('MarmotGroupEngine#send case "foundingAdd"', () => {
+  it("resolves ordered single and array Add builders through the common public contract", async () => {
+    const { impl, adminPubkey, epoch0 } = await foundingGroup();
+    const { peeler, wrapCount } = countingPeeler(impl);
+    const engine = new MarmotGroupEngine({
+      state: epoch0,
+      ciphersuite: impl,
+      peeler,
+    });
+    const adds: Proposal[] = [];
+    for (const slot of [0, 1, 2]) {
+      const kp = await inviteeKeyPackage(slot, impl);
+      adds.push({
+        proposalType: defaultProposalTypes.add,
+        add: { keyPackage: kp.publicPackage },
+      });
+    }
+    const contexts: ProposalContext[] = [];
+    const ordinary: Extract<GroupSessionSendIntent, { kind: "commit" }> = {
+      kind: "commit",
+      actorPubkey: adminPubkey,
+      extraProposals: [
+        [
+          async (context) => {
+            contexts.push(context);
+            return adds[0]!;
+          },
+        ],
+        async (context) => {
+          contexts.push(context);
+          return adds.slice(1);
+        },
+      ],
+    };
+    const intent: Extract<SendIntent, { kind: "foundingAdd" }> = {
+      kind: "foundingAdd",
+      actorPubkey: ordinary.actorPubkey,
+      extraProposals: ordinary.extraProposals!,
+    };
+    const result = await engine.send(intent);
+    expect(result.kind).toBe("foundingGroupCreated");
+    if (result.kind !== "foundingGroupCreated")
+      throw new Error("expected founding group");
+    expect(contexts[0]).toBe(contexts[1]);
+    expect(contexts[0]!.state).toBe(epoch0);
+    expect(
+      framedCommitProposals(result.pending.commitMessage!, epoch0),
+    ).toEqual(adds);
+    expect(result.welcome.welcome.secrets).toHaveLength(3);
+    expect(wrapCount()).toBe(0);
+    engine.confirmPublished(result.pending);
+    expect(engine.state.groupContext.epoch).toBe(1n);
+    expect(engine.lifecycle).toBe("Stable");
+  });
+
+  it.each(["empty", "mixed"] as const)(
+    "rejects a %s founding builder result before state change",
+    async (shape) => {
+      const { impl, adminPubkey, epoch0 } = await foundingGroup();
+      const { peeler, wrapCount } = countingPeeler(impl);
+      const engine = new MarmotGroupEngine({
+        state: epoch0,
+        ciphersuite: impl,
+        peeler,
+      });
+      const kp = await inviteeKeyPackage(0, impl);
+      const proposals: Proposal[] =
+        shape === "empty"
+          ? []
+          : [
+              {
+                proposalType: defaultProposalTypes.add,
+                add: { keyPackage: kp.publicPackage },
+              },
+              {
+                proposalType: defaultProposalTypes.remove,
+                remove: { removed: 0 },
+              },
+            ];
+      await expect(
+        engine.send({
+          kind: "foundingAdd",
+          actorPubkey: adminPubkey,
+          extraProposals: [async () => proposals],
+        }),
+      ).rejects.toThrow(
+        shape === "empty" ? /empty proposal/i : /may only carry Add/,
+      );
+      expect(engine.state).toBe(epoch0);
+      expect(engine.lifecycle).toBe("Stable");
+      expect(wrapCount()).toBe(0);
+    },
+  );
+
   it("FOUND-01: builds no transport envelope for the founding commit", async () => {
     const { impl, adminPubkey, epoch0 } = await foundingGroup();
     const { peeler, wrapCount } = countingPeeler(impl);

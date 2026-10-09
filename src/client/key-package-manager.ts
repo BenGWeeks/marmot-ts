@@ -10,10 +10,9 @@ import {
   Welcome,
 } from "ts-mls";
 
-import {
-  getKeyPackageLifetime,
-  getKeyPackageRelays,
-} from "../core/key-package-event.js";
+import { getKeyPackageLifetime } from "../core/key-package-event.js";
+import { validateKeyPackageSlot } from "../core/key-package-event-encode.js";
+import { isReusableKeyPackage } from "../core/key-package.js";
 import {
   ADDRESSABLE_KEY_PACKAGE_KIND,
   KEY_PACKAGE_MLS_VERSION_TAG,
@@ -34,6 +33,7 @@ import {
 import { KeyPackagePublisher } from "./key-package-publisher.js";
 import {
   KeyPackageStore,
+  normalizeKeyPackageRelays,
   ListedKeyPackage,
   LocalKeyPackage,
   StoredKeyPackage,
@@ -85,7 +85,7 @@ export type CreateKeyPackageOptions = {
   identifier?: string;
   /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
   ciphersuite?: CiphersuiteName;
-  /** Whether to mark the key package with the MLS last_resort extension (default: true) */
+  /** Whether to include the canonical reusable KeyPackage component (default: true) */
   isLastResort?: boolean;
   /** Client identifier string to include in the key package event */
   client?: string;
@@ -97,7 +97,7 @@ export type CreateKeyPackageOptions = {
 export type RotateKeyPackageOptions = {
   /**
    * Relay URLs for the new key package event.
-   * If omitted, the relays from the most recent publish of the old key package are reused.
+   * If omitted, the locally stored publication routes of the old key package are reused.
    */
   relays?: string[];
   /**
@@ -108,7 +108,7 @@ export type RotateKeyPackageOptions = {
   d?: string;
   /** Ciphersuite to use for the new key package */
   ciphersuite?: CiphersuiteName;
-  /** Whether to mark the new key package with the MLS last_resort extension (default: true) */
+  /** Whether to include the canonical reusable KeyPackage component (default: true) */
   isLastResort?: boolean;
   /** Client identifier string to include in the new key package event */
   client?: string;
@@ -138,6 +138,8 @@ export type KeyPackageManagerEvents = {
 export type KeyPackageManagerOptions = {
   /** The backend to store and load the key packages from */
   store: GenericKeyValueStore<StoredKeyPackage>;
+  /** Confirms durable adoption when recovering consumption receipts on startup/retry. */
+  hasAdoptedGroup?: (groupId: Uint8Array) => Promise<boolean>;
   /** Default `d` tag value for {@link KeyPackageManager.create} and {@link KeyPackageManager.rotate}. Falls back to this when no explicit `d` is passed. */
   clientId?: string;
   /** The signer used for the clients identity */
@@ -164,8 +166,8 @@ export type KeyPackageManagerOptions = {
 export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
   /**
    * Default slot identifier (`d` tag value) used by {@link create} when no
-   * explicit `d` is passed in options. Set this to a stable string (e.g.
-   * `"my-app-desktop"`) so all key packages from this manager share a single
+   * explicit `d` is passed in options. Generate 32 random bytes once and persist
+   * their 64-character lowercase hex encoding so key packages share a single
    * addressable slot on relays.
    */
   readonly clientId: string | undefined;
@@ -178,9 +180,15 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    */
   readonly #verifyEvent: VerifyEventMethod;
   #log = logger.extend("KeyPackageManager");
+  readonly #hasAdoptedGroup:
+    ((groupId: Uint8Array) => Promise<boolean>) | undefined;
+  #ready: Promise<void> = Promise.resolve();
+  #consumptionWork: Promise<void> = Promise.resolve();
 
   constructor(options: KeyPackageManagerOptions) {
     super();
+    if (options.clientId !== undefined)
+      validateKeyPackageSlot(options.clientId);
     this.clientId = options.clientId;
     this.#store = new KeyPackageStore(options.store, options.cryptoProvider);
     this.#publisher = new KeyPackagePublisher({
@@ -199,6 +207,11 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     this.#store.on("added", (keyPackage) => this.emit("added", keyPackage));
     this.#store.on("removed", (ref) => this.emit("removed", ref));
     this.#store.on("updated", (keyPackage) => this.emit("updated", keyPackage));
+    this.#hasAdoptedGroup = options.hasAdoptedGroup;
+    this.#ready = this.finalizeConsumptions();
+    void this.#ready.catch((error) =>
+      this.#log("consumption recovery failed: %O", error),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -213,7 +226,9 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    */
   async add(
     keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> &
-      Partial<Pick<LocalKeyPackage, "published" | "identifier">>,
+      Partial<
+        Pick<LocalKeyPackage, "published" | "identifier" | "publicationRelays">
+      >,
   ): Promise<string> {
     return this.#store.add(keyPackage);
   }
@@ -234,14 +249,19 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    * @throws {MissingSlotIdentifierError} if no slot identifier can be determined
    */
   async create(options: CreateKeyPackageOptions): Promise<ListedKeyPackage> {
+    if (options.identifier !== undefined)
+      validateKeyPackageSlot(options.identifier);
+    const identifier = options.identifier ?? this.clientId;
+    if (identifier !== undefined) validateKeyPackageSlot(identifier);
     if (!options.relays || options.relays.length === 0) {
       throw new MissingRelayError();
     }
 
-    const identifier = options.identifier ?? this.clientId;
-    if (!identifier) {
+    if (identifier === undefined) {
       throw new MissingSlotIdentifierError();
     }
+    const relays = normalizeKeyPackageRelays(options.relays);
+    if (relays.length === 0) throw new MissingRelayError();
 
     this.#log("creating key package on relays: %O", options.relays);
 
@@ -251,24 +271,28 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     });
 
     // Store private material locally, including the slot identifier
-    const refHex = await this.#store.add({ ...keyPackage, identifier });
+    const refHex = await this.#store.add({
+      ...keyPackage,
+      identifier,
+      publicationRelays: relays,
+    });
 
     // Build, sign and publish the kind 30443 event
     const signed = await this.#publisher.publish({
       keyPackage: keyPackage.publicPackage,
       identifier,
-      relays: options.relays,
+      relays,
       client: options.client,
       protected: options.protected,
     });
 
     // Record the published event on the stored entry
-    await this.#store.addPublished(refHex, signed);
+    await this.#store.addPublished(refHex, signed, relays);
 
     const stored = await this.#store.get(refHex);
     if (!stored) throw new Error("Key package not found after store operation");
 
-    this.emit("published", refHex, signed.id, options.relays);
+    this.emit("published", refHex, signed.id, relays);
     this.#log(
       "created and published key package %s with slot %s",
       refHex,
@@ -279,6 +303,7 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
       keyPackageRef: stored.keyPackageRef,
       publicPackage: stored.publicPackage,
       identifier: stored.identifier,
+      publicationRelays: stored.publicationRelays,
     };
   }
 
@@ -301,6 +326,8 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
   async ensurePublished(
     options: CreateKeyPackageOptions,
   ): Promise<ListedKeyPackage> {
+    if (options.identifier !== undefined)
+      validateKeyPackageSlot(options.identifier);
     const existing = await this.list();
     const unused = existing.find((pkg) => !pkg.used && !pkg.nonCurrent);
     if (unused) return unused;
@@ -329,6 +356,7 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     ref: Uint8Array | string,
     options?: RotateKeyPackageOptions,
   ): Promise<ListedKeyPackage> {
+    if (options?.d !== undefined) validateKeyPackageSlot(options.d);
     const refHex = typeof ref === "string" ? ref : bytesToHex(ref);
     this.#log("rotating key package %s", refHex);
 
@@ -338,12 +366,9 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     }
 
     // Determine relays for the new key package
-    const oldEvents = existing.published ?? [];
-    const relaysForNew =
-      options?.relays ??
-      (oldEvents.length > 0
-        ? getKeyPackageRelays(oldEvents[oldEvents.length - 1])
-        : undefined);
+    const relaysForNew = normalizeKeyPackageRelays(
+      options?.relays ?? existing.publicationRelays ?? [],
+    );
 
     if (!relaysForNew || relaysForNew.length === 0) {
       throw new KeyPackageRotatePreconditionError();
@@ -413,11 +438,11 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     for (const ref of refList) {
       const stored = await this.#store.get(ref);
       const events = stored?.published ?? [];
+      const relays = normalizeKeyPackageRelays(stored?.publicationRelays ?? []);
+      if (events.length && !relays.length) throw new MissingRelayError();
+      for (const relay of relays) allRelays.add(relay);
       for (const event of events) {
         allEvents.push(event);
-        for (const relay of getKeyPackageRelays(event) ?? []) {
-          allRelays.add(relay);
-        }
       }
     }
 
@@ -449,9 +474,13 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    * method converts to a `false` return without an emit).
    *
    * @param event - Any Nostr event; non-key-package events are silently ignored
+   * @param relays - Locally known observation/publication destinations for future cleanup.
    * @returns `true` if the event was recorded, `false` if ignored or rejected
    */
-  async track(event: NostrEvent): Promise<boolean> {
+  async track(
+    event: NostrEvent,
+    relays: readonly string[] = [],
+  ): Promise<boolean> {
     if (event.kind !== ADDRESSABLE_KEY_PACKAGE_KIND) {
       return false;
     }
@@ -488,15 +517,14 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
     }
 
     try {
-      await this.#store.addPublished(refHex, event);
+      await this.#store.addPublished(refHex, event, relays);
     } catch {
       // Event body could not be decoded as a KeyPackage, or its `i` tag does
       // not match the recomputed ref — treat as invalid.
       return false;
     }
 
-    const relays = getKeyPackageRelays(event) ?? [];
-    this.emit("published", refHex, event.id, relays);
+    this.emit("published", refHex, event.id, normalizeKeyPackageRelays(relays));
     return true;
   }
 
@@ -510,21 +538,25 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    * (`0x8009`) carry `nonCurrent: true` (D-09) — see {@link ensurePublished}.
    */
   async list(): Promise<ListedKeyPackage[]> {
+    await this.#ready;
     return this.#store.snapshot();
   }
 
   /** Returns the number of locally stored key packages. */
   async count(): Promise<number> {
+    await this.#ready;
     return this.#store.count();
   }
 
   /** Checks whether a key package exists in local private key storage. */
   async has(ref: Uint8Array | string): Promise<boolean> {
+    await this.#ready;
     return this.#store.has(ref);
   }
 
   /** Retrieves the full key package from the store. */
   async get(ref: Uint8Array | string): Promise<StoredKeyPackage | null> {
+    await this.#ready;
     return this.#store.get(ref);
   }
 
@@ -538,6 +570,7 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
   async getPrivateKey(
     ref: Uint8Array | string,
   ): Promise<PrivateKeyPackage | null> {
+    await this.#ready;
     return this.#store.getPrivateKey(ref);
   }
 
@@ -563,6 +596,11 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
 
     for (const entry of entries) {
       if (entry.publicPackage.cipherSuite !== welcome.cipherSuite) continue;
+      try {
+        isReusableKeyPackage(entry.publicPackage);
+      } catch {
+        continue;
+      }
 
       const privatePackage = await this.getPrivateKey(entry.keyPackageRef);
       if (!privatePackage) continue;
@@ -601,6 +639,27 @@ export class KeyPackageManager extends EventEmitter<KeyPackageManagerEvents> {
    */
   async markUsed(ref: Uint8Array | string): Promise<void> {
     return this.#store.markUsed(ref);
+  }
+
+  /** Records an intent after all Welcome checks and before durable adoption. */
+  async recordConsumption(groupId: Uint8Array, ref: Uint8Array): Promise<void> {
+    await this.#ready;
+    const work = this.#consumptionWork.then(() =>
+      this.#store.recordConsumption(groupId, ref),
+    );
+    this.#consumptionWork = work.catch(() => {});
+    return work;
+  }
+
+  /** Retries idempotent retirement for receipts backed by durable adopted groups. */
+  finalizeConsumptions(): Promise<void> {
+    const work = this.#consumptionWork.then(async () => {
+      if (this.#hasAdoptedGroup)
+        await this.#store.finalizeConsumptions(this.#hasAdoptedGroup);
+    });
+    this.#consumptionWork = work.catch(() => {});
+    this.#ready = work;
+    return work;
   }
 
   /** Clears all entries (local and tracked) from the store. */

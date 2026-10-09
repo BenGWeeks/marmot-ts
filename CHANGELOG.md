@@ -2,8 +2,20 @@
 
 ## Unreleased
 
+- Cancelling an image replacement or closing its image service now stops queued and preparing MLS image changes before publication, while ordinary group operations remain usable. Image changes already being published retain their publication outcome.
+
+- Keep verified image bytes intact when a cache entry is replaced or evicted while a read is awaiting contact policy; cancelled and closed reads release their private plaintext.
+
+- Group destruction now waits for admitted lifecycle storage writes and refuses stale disband, lifecycle enablement, leave, and publication work, preventing deleted groups from recreating local data or publishing a terminal commit after closure.
+
 ### Added
 
+- Follow the dedicated [Group images guide](docs/client/group-images.md) for explicit Blossom configuration, verified reads, cancellation, replacement and snapshot-safe display.
+- Clear encrypted Blossom image metadata while preserving URL avatars. Clear leaves remote blobs and previously shared upload credentials intact; remote deletion and credential revocation require application/service policy.
+- Replace and clear encrypted group images through the normal MLS confirmation workflow, and retrieve verified image bytes through `MarmotGroup.image` using explicit application endpoints.
+- Encode, encrypt and authenticate encrypted Blossom group-image metadata through pure core helpers, with independent image credentials and ciphertext integrity checks.
+- Read a canonical group image source that preserves URL-avatar precedence and identifies complete Blossom metadata snapshots without downloading image bytes.
+- Import `marmotAuthService` from the root or `/core` entrypoint for MLS basic-credential identity and curve validation. Account-proof binding and group authorization remain separate Marmot checks.
 - Use `MarmotGroupEngine` from the engine entrypoint to manage group state without a Nostr transport, with changes applied after successful publication.
 - Use `GroupSession`, `MarmotGroup.session`, and `MarmotGroup.runtime` for direct control over group send, receive, persistence, and publication. `GroupsManager` adds session and runtime helpers, including Welcome delivery.
 - Encrypt and decrypt group media with `GroupMediaService`, including a cache for decrypted media.
@@ -13,11 +25,42 @@
 
 ### Changed
 
+- Group image replacements and clears share a bounded FIFO queue tied to the loaded group instance. Unloading or destroying a group closes its image service and prevents queued changes from reaching a replacement instance.
+
+- Encrypted group-image reads share work only across compatible caller profiles, keep cancellation independent, and cache verified plaintext in bounded memory. Cached and shared results recheck current policy and canonical image metadata before delivery.
+
+- Encrypted group-image HTTP operations reject redirects and malformed upload descriptors, enforce streaming byte and time limits, and use narrowly scoped image credentials with explicit contact policy checks.
+
+- New KeyPackages advertise encrypted group-image support. Recovery validates image metadata and parent-admin authority, and authorized commits can atomically unrequire and remove optional image metadata.
+
+- Direct session/facade commits that change encrypted group images now require `expectedParent: group.session.parentToken`, captured before upload or other asynchronous preparation. Stale replacements are refused after convergence waits; ordinary commits keep the existing contract.
+
+- Application messages include an exact NIP-40 expiration hint computed with checked bigint arithmetic from the inner timestamp and source epoch's retention policy. Missing or disabled retention, invalid timestamps and overflowing sums omit the hint; commits and proposals remain untagged. Retries preserve the original signed event even after policy changes.
+- Fork invalidations include strict rumor and transport IDs plus the losing state's producing commit when known. Delivered evidence survives restarts when both ingestion-state and rewind stores are persisted; older messages without ledger evidence remain unattributable.
 - Bundle the forked MLS implementation with the library. Import MLS primitives from `@internet-privacy/marmot-ts/mls`; additional cryptographic backends are optional dependencies needed only for their ciphersuites.
 - Sign account identity proofs with the client's own signer using the current `0x8009` member proof format.
 
 ### Fixed
 
+- Reject malformed encrypted group-image metadata in Welcome invitations before saving a group or consuming its single-use KeyPackage, including optional image components. Valid present and cleared images remain supported.
+
+- Closing a group-image service also cancels active uploads and queued image changes, wipes owned plaintext buffers, and prevents late callbacks from delivering an image after closure.
+- Unloaded sessions refuse delayed storage writes and notifications; publication results refuse late Welcome completion after the owning group closes.
+
+- Image changes recheck current admin membership, profile, canonical parent and lifecycle after uploads and during MLS preparation. Closed groups abort image uploads and refuse late publication or persistence completion.
+
+- Refuse encrypted group-image proposals, clears and removals from non-admin members, prevent an admin commit from accepting a referenced image proposal authored by a non-admin, and reject malformed image metadata carried forward by a commit.
+
+- Destroying or successfully leaving a group deletes its plaintext delivery ledger and pending retractions, and fences delayed saves so cleanup cannot recreate them.
+- Keep canonical history rumors visible when another transport delivery of the same rumor loses convergence, including restored pending retractions.
+- Preserve every losing-branch history retraction across interrupted multi-message rewinds and retry outstanding removals after restart.
+- Preserve write-ahead terminal convergence evidence before saving rewind history, so interrupted history writes remain recoverable after restart.
+- Losing-branch rumors are durably retracted from supported history and live timelines refresh from filtered snapshots, including limited-page refill.
+- Group watches accept an `AbortSignal`, finish promptly when cancelled or returned while idle or loading, and retain updates racing with snapshots.
+- Serialize connected group ingestion across backfill and live subscriptions, drain admitted work after disconnect, and forward live and timer-driven convergence results through `groups.on("ingestResult", ...)`. Connection options now accept an `AbortSignal` to cancel pending backfill.
+- Accept proposal builders returning one or several proposals for ordinary commits and founding Adds, preserving their order and rejecting invalid results before publication.
+- Authenticate the real Welcome author and require active admin membership in a fully validated group before saving it. Rejected and duplicate invitations preserve existing group state and KeyPackage material.
+- Retire single-use KeyPackage private material after validated durable group adoption, retaining public metadata for rotation and purge. Receipts finish interrupted cleanup after restart or `keyPackages.finalizeConsumptions()`; reusable packages retain their keys for later joins and use the canonical empty-data component marker.
 - Publish KeyPackage proposal tags that match the advertised proposals, including GREASE values, so MDK accepts them. Reject missing, malformed, or mismatched proposal tags when selecting invite candidates; matching older tags without GREASE remain supported.
 - Validate member identity proofs during sends, ingestion, and fork recovery, preventing invalid membership changes from being accepted.
 - Authorize commits against their parent state, including during fork recovery and when an admin is demoted earlier in an ingestion batch.
@@ -25,6 +68,9 @@
 
 ### Breaking changes
 
+- Reusable KeyPackages require the canonical empty-data `0x0004` component in the KeyPackage dictionary; legacy-only `0x000a` markers are deliberately rejected. Generate and republish current packages. Publications omit relay tags; destinations are retained locally across restarts for rotation and purge. Older route-less records need explicit rotation routes or locally supplied tracking routes for cleanup.
+- Publication identifiers (`clientId`, `identifier`, and rotation `d`) must be exactly 64 lowercase hex characters and invalid values reject before side effects. Generate 32 random bytes once, encode as lowercase hex and persist that slot instead of a device label. Publish under the new slot, then delete the old publication through known routes: a different `d` does not replace the old address. See the [publication slot migration](docs/core/key-packages.md#publication-slot-migration) for the create/purge and rotation paths.
+- Custom `GroupSessionHistory`/`BaseGroupHistory` implementations must implement idempotent `removeMessage(rumorId)`; custom `GroupRumorHistoryBackend` implementations must implement durable `removeRumor(rumorId)`. Remove by the canonical inner ID and resolve only after persistence succeeds.
 - Legacy account identity proofs (`0xf2f1`) and their helper exports are removed. New groups require `0x8009`; incompatible groups cannot be joined, and stored incompatible groups refuse traffic. Republish current KeyPackages and explicitly purge obsolete ones. See the [account identity proof migration guide](docs/client/best-practices.md#migrating-to-account-identity-proof-v2-0x8009).
 - Separate proof-signer options are removed. `generateKeyPackage` requires a `signer`, and `makeLeafAppComponentsExtension` requires an encoded current proof.
 - `ForkRecovery.resolveFork` now takes an `adminCallbackFor` function instead of a single `adminCallback`.

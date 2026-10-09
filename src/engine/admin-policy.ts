@@ -12,6 +12,8 @@ import {
 } from "ts-mls";
 
 import { decodeAdminPolicyV1 } from "../core/components/admin-policy.js";
+import { decodeGroupBlossomImage } from "../core/components/blossom-image.js";
+import { validateGroupImageProposals } from "../core/components/image-validation.js";
 import { decodeAgentTextStreamQuicPolicyV1 } from "../core/components/agent-text-stream.js";
 import { decodeComponentsList } from "../core/components/app-components-list.js";
 import { decodeGroupAvatarUrlV1 } from "../core/components/avatar-url.js";
@@ -25,6 +27,7 @@ import {
   type AppComponentId,
   GROUP_ADMIN_POLICY_COMPONENT_ID,
   GROUP_AVATAR_URL_COMPONENT_ID,
+  GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
   GROUP_ENCRYPTED_MEDIA_COMPONENT_ID,
   GROUP_LIFECYCLE_COMPONENT_ID,
   GROUP_MESSAGE_RETENTION_COMPONENT_ID,
@@ -50,6 +53,8 @@ function toLeafIndex(index: number): LeafIndex {
  * Payload decoders for every app component whose format this library knows.
  * An AppDataUpdate for an id outside this table is opaque to the library and
  * left to the application (`app-components/README.md` "Unknown Data").
+ * Advertised image support (0x8002) depends on its strict present/empty decoder
+ * here; capability negotiation must never precede known payload admission.
  */
 const COMPONENT_PAYLOAD_DECODERS: ReadonlyMap<
   number,
@@ -62,6 +67,7 @@ const COMPONENT_PAYLOAD_DECODERS: ReadonlyMap<
   [GROUP_MESSAGE_RETENTION_COMPONENT_ID, decodeMessageRetentionV1],
   [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1],
   [GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1],
+  [GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImage],
   [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1],
   [GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1],
 ]);
@@ -299,13 +305,29 @@ export function createAdminCommitPolicyCallback(args: {
           [incoming.proposal],
           ratchetTree,
           ciphersuiteId,
-        )
+        ) ||
+        validateGroupImageProposals({
+          ratchetTree,
+          adminPubkeys,
+          proposals: [incoming.proposal],
+        }).kind !== "legal"
         ? "reject"
         : "accept";
     }
 
     if (
       validatePreApplyProposals(incoming.proposals, ciphersuiteId, requiredIds)
+    )
+      return "reject";
+
+    if (
+      validateGroupImageProposals({
+        ratchetTree,
+        adminPubkeys,
+        proposals: incoming.proposals,
+        committerLeafIndex: incoming.senderLeafIndex,
+        requireCommitter: true,
+      }).kind !== "legal"
     )
       return "reject";
 

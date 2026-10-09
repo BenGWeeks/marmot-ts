@@ -13,6 +13,8 @@ import {
   Lifetime,
   makeKeyPackageRef,
   PrivateKeyPackage,
+  appDataDictionaryExtensionType,
+  makeAppDataDictionaryExtension,
 } from "ts-mls";
 import { hexToBytes } from "@noble/hashes/utils.js";
 
@@ -28,7 +30,9 @@ import {
 } from "./components/index.js";
 import { getCredentialPubkey } from "./credential.js";
 import { defaultCapabilities } from "./default-capabilities.js";
-import { ensureLastResortExtension } from "./extensions.js";
+import { LAST_RESORT_EXTENSION_TYPE } from "./protocol.js";
+import { readKeyPackageDictionary } from "./key-package-dictionary.js";
+import { appComponentsEntry } from "./components/dictionary.js";
 
 /**
  * A complete key package containing both public and private components.
@@ -45,8 +49,15 @@ export type CompleteKeyPackage = {
 
 /** Create default extensions for a key package */
 export function keyPackageDefaultExtensions(): CustomExtension[] {
-  return ensureLastResortExtension([]);
+  return [
+    makeAppDataDictionaryExtension([
+      appComponentsEntry([0x0004]),
+      { componentId: 0x0004, data: new Uint8Array() },
+    ]),
+  ];
 }
+
+export { isReusableKeyPackage } from "./key-package-dictionary.js";
 
 /** Calculates a key package reference with the hash implementation based on the key package's cipher suite */
 export async function calculateKeyPackageRef(
@@ -67,10 +78,11 @@ export type GenerateKeyPackageOptions = {
   lifetime?: Lifetime;
   extensions?: CustomExtension[];
   /**
-   * Whether to mark this KeyPackage as reusable using the MLS `last_resort` extension.
+   * Whether to mark this KeyPackage as reusable using the canonical empty-data
+   * `last_resort_key_package` component in its KeyPackage dictionary.
    *
-   * - `true`: include the `last_resort` KeyPackage extension (reusable; helps with race windows)
-   * - `false`: omit the extension (single-use; private init_key is expected to be consumed)
+   * - `true`: include the component (reusable; helps with race windows)
+   * - `false`: omit the component (single-use; private init_key is expected to be consumed)
    *
    * Default: `true` for backwards compatibility with existing marmot-ts behavior.
    */
@@ -125,12 +137,29 @@ export async function generateKeyPackage({
     throw new Error(
       `generateKeyPackage: lifetime range ${resolvedLifetime.notAfter - resolvedLifetime.notBefore}s exceeds the 7,261,200s (84-day) cap`,
     );
-  // Marmot requires support for last_resort capability signaling (`foundation/key-packages.md`),
-  // but individual KeyPackages may be single-use or last-resort reusable.
-  // `isLastResort` controls whether this KeyPackage is marked reusable.
-  const resolvedExtensions = isLastResort
-    ? ensureLastResortExtension(extensions ?? [])
-    : (extensions ?? []);
+  // Reuse is KeyPackage data, never an MLS capability or LeafNode entry
+  // (refs/marmot/foundation/key-packages.md).
+  const suppliedExtensions = extensions ?? [];
+  const dictionary = (
+    readKeyPackageDictionary(suppliedExtensions) ?? []
+  ).filter(
+    (entry) => entry.componentId !== 0x0004 && entry.componentId !== 0x0001,
+  );
+  if (isLastResort)
+    dictionary.push({ componentId: 0x0004, data: new Uint8Array() });
+  dictionary.sort((a, b) => a.componentId - b.componentId);
+  const resolvedExtensions = suppliedExtensions.filter(
+    (extension) =>
+      extension.extensionType !== LAST_RESORT_EXTENSION_TYPE &&
+      extension.extensionType !== appDataDictionaryExtensionType,
+  );
+  if (dictionary.length)
+    resolvedExtensions.push(
+      makeAppDataDictionaryExtension([
+        appComponentsEntry(dictionary.map((entry) => entry.componentId)),
+        ...dictionary,
+      ]),
+    );
 
   // Every leaf carries exactly one 0x8009 account identity proof binding the
   // leaf signature key to the Nostr account (refs/marmot/app-components/

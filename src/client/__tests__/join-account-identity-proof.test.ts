@@ -13,11 +13,12 @@ import {
   defaultProposalTypes,
   getCiphersuiteImpl,
   generateKeyPackageWithKey,
+  joinGroupWithExtensions,
   selfRemoveProposalType,
   type CiphersuiteImpl,
   type ExtensionRequiredCapabilities,
 } from "ts-mls";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { hexToBytes } from "@noble/hashes/utils.js";
 
 import { MarmotClient } from "../marmot-client.js";
@@ -30,7 +31,10 @@ import {
 } from "../../__tests__/helpers/account-identity-proof-fixtures.js";
 import { marmotAuthService } from "../../core/auth-service.js";
 import type { SerializedClientState } from "../../core/client-state.js";
+import { getMarmotGroupView } from "../../core/client-state.js";
+import { validateWelcomeGroup } from "../../core/welcome-join.js";
 import { createCredential } from "../../core/credential.js";
+import { createWelcomeRumor } from "../../core/welcome-event.js";
 import { defaultCapabilities } from "../../core/default-capabilities.js";
 import { createGroup, createSimpleGroup } from "../../core/group.js";
 import {
@@ -44,7 +48,13 @@ import {
 import { makeLeafAppComponentsExtension } from "../../core/components/dictionary.js";
 import {
   adminPolicyEntry,
+  componentEntry,
+  groupLifecycleEntry,
+  GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+  GROUP_MESSAGE_RETENTION_COMPONENT_ID,
   groupProfileEntry,
+  encodeGroupBlossomImage,
+  type GroupBlossomImage,
 } from "../../core/components/index.js";
 import { createDefaultKeyPackageLifetime } from "../../utils/timestamp.js";
 import type { StoredKeyPackage } from "../key-package-manager.js";
@@ -59,16 +69,18 @@ describe("joinFromWelcome account identity proof profile (CUT-02, D-07)", () => 
   let ciphersuiteImpl: CiphersuiteImpl;
   let mockNetwork: MockNetwork;
   let inviteeGroupStateStore: InMemoryKeyValueStore<SerializedClientState>;
+  let inviteeKeyPackageStore: InMemoryKeyValueStore<StoredKeyPackage>;
   let inviteeClient: MarmotClient;
 
   beforeEach(async () => {
     ciphersuiteImpl = await getCiphersuiteImpl(SUITE, defaultCryptoProvider);
     mockNetwork = new MockNetwork();
     inviteeGroupStateStore = new InMemoryKeyValueStore<SerializedClientState>();
+    inviteeKeyPackageStore = new InMemoryKeyValueStore<StoredKeyPackage>();
     const inviteeAccount = testAccount(9);
     inviteeClient = new MarmotClient({
       groupStateStore: inviteeGroupStateStore,
-      keyPackageStore: new InMemoryKeyValueStore<StoredKeyPackage>(),
+      keyPackageStore: inviteeKeyPackageStore,
       signer: inviteeAccount.signer,
       network: mockNetwork,
     });
@@ -115,6 +127,305 @@ describe("joinFromWelcome account identity proof profile (CUT-02, D-07)", () => 
     });
   }
 
+  async function imageWelcome(required: boolean, data: Uint8Array) {
+    const admin = testAccount(6);
+    const invitee = testAccount(9);
+    const adminKp = await generateKeyPackage({
+      credential: createCredential(admin.pubkey),
+      ciphersuiteImpl,
+      signer: admin.signer,
+    });
+    const inviteeKp = await generateKeyPackage({
+      credential: createCredential(invitee.pubkey),
+      ciphersuiteImpl,
+      signer: invitee.signer,
+      isLastResort: false,
+    });
+    const { clientState } = await createGroup({
+      creatorKeyPackage: adminKp,
+      ciphersuiteImpl,
+      components: [
+        groupProfileEntry({ name: "Image Welcome", description: "" }),
+        adminPolicyEntry([admin.pubkey]),
+        componentEntry(GROUP_BLOSSOM_IMAGE_COMPONENT_ID, data),
+      ],
+      requiredComponentIds: required ? [GROUP_BLOSSOM_IMAGE_COMPONENT_ID] : [],
+    });
+    const welcome = await commitInviteeAdd(
+      clientState,
+      inviteeKp.publicPackage,
+    );
+    // A real MLS join verifies the GroupInfo signature, tree and confirmation
+    // before the independent Marmot complete-state admission check.
+    const joined = await joinGroupWithExtensions({
+      context: {
+        cipherSuite: ciphersuiteImpl,
+        authService: marmotAuthService,
+        externalPsks: {},
+      },
+      welcome,
+      keyPackage: inviteeKp.publicPackage,
+      privateKeys: inviteeKp.privatePackage,
+    });
+    const welcomeRumor = createWelcomeRumor({
+      welcome,
+      author: admin.pubkey,
+      groupRelays: ["wss://relay.test"],
+      keyPackageEventId: "ab".repeat(32),
+    });
+    return { admin, inviteeKp, welcome, welcomeRumor, joined };
+  }
+
+  const malformedImages = [
+    { shape: "truncated", data: Uint8Array.of(1) },
+    { shape: "zero-length", data: new Uint8Array() },
+  ];
+  it.each(
+    [false, true].flatMap((required) =>
+      malformedImages.map((image) => ({ required, ...image })),
+    ),
+  )(
+    "rejects a signed $shape image Welcome (required=$required) before all join effects",
+    async ({ required, data }) => {
+      const existing = await inviteeClient.groups.create("Existing", {
+        relays: ["wss://relay.test"],
+      });
+      const { inviteeKp, welcome, welcomeRumor, joined } = await imageWelcome(
+        required,
+        data,
+      );
+      await inviteeClient.keyPackages.add(inviteeKp);
+      const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+      const beforeGroups = structuredClone(
+        await Promise.all(
+          (await inviteeGroupStateStore.keys()).map(async (key) => [
+            key,
+            await inviteeGroupStateStore.getItem(key),
+          ]),
+        ),
+      );
+      const beforePackages = structuredClone(
+        await Promise.all(
+          (await inviteeKeyPackageStore.keys()).map(async (key) => [
+            key,
+            await inviteeKeyPackageStore.getItem(key),
+          ]),
+        ),
+      );
+      const beforePrivate = structuredClone(
+        await inviteeClient.keyPackages.getPrivateKey(ref),
+      );
+      const beforeAdopt = vi.fn(async () => {});
+      const receipt = vi.spyOn(inviteeClient.keyPackages, "recordConsumption");
+      const save = vi.spyOn(inviteeGroupStateStore, "setItem");
+      const packageWrite = vi.spyOn(inviteeKeyPackageStore, "setItem");
+      const joinedEvent = vi.fn();
+      const updatedEvent = vi.fn();
+      const loadedEvent = vi.fn();
+      inviteeClient.groups.on("joined", joinedEvent);
+      inviteeClient.groups.on("updated", updatedEvent);
+      inviteeClient.groups.on("loaded", loadedEvent);
+
+      expect(() =>
+        validateWelcomeGroup(joined.state, joined.groupInfo),
+      ).toThrow();
+      await expect(
+        inviteeClient.groups.joinFromWelcome({
+          welcome,
+          candidates: [
+            { ...inviteeKp, keyPackageRef: ref, hasMatchingSecret: true },
+          ],
+          ciphersuiteImpl,
+          beforeAdopt,
+        }),
+      ).rejects.toThrow();
+      await expect(
+        inviteeClient.joinGroupFromWelcome({ welcomeRumor }),
+      ).rejects.toThrow();
+
+      expect(beforeAdopt).not.toHaveBeenCalled();
+      expect(receipt).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+      expect(packageWrite).not.toHaveBeenCalled();
+      expect(joinedEvent).not.toHaveBeenCalled();
+      expect(updatedEvent).not.toHaveBeenCalled();
+      expect(loadedEvent).not.toHaveBeenCalled();
+      expect(inviteeClient.groups.loaded).toEqual([existing]);
+      expect(
+        await Promise.all(
+          (await inviteeGroupStateStore.keys()).map(async (key) => [
+            key,
+            await inviteeGroupStateStore.getItem(key),
+          ]),
+        ),
+      ).toEqual(beforeGroups);
+      expect(
+        await Promise.all(
+          (await inviteeKeyPackageStore.keys()).map(async (key) => [
+            key,
+            await inviteeKeyPackageStore.getItem(key),
+          ]),
+        ),
+      ).toEqual(beforePackages);
+      expect(await inviteeClient.keyPackages.getPrivateKey(ref)).toEqual(
+        beforePrivate,
+      );
+      expect(beforePrivate).not.toBeNull();
+    },
+  );
+
+  const validImages: GroupBlossomImage[] = [
+    { kind: "empty" },
+    {
+      kind: "present",
+      imageHash: new Uint8Array(32).fill(1),
+      imageKey: new Uint8Array(32).fill(2),
+      imageNonce: new Uint8Array(12).fill(3),
+      imageUploadKey: new Uint8Array(32).fill(4),
+      mediaType: "image/png",
+    },
+  ];
+  it.each(
+    [false, true].flatMap((required) =>
+      validImages.map((image) => ({ required, kind: image.kind, image })),
+    ),
+  )(
+    "adopts a signed $kind image Welcome (required=$required) and retires its single-use key",
+    async ({ required, image }) => {
+      const { admin, inviteeKp, welcomeRumor, joined } = await imageWelcome(
+        required,
+        encodeGroupBlossomImage(image),
+      );
+      expect(validateWelcomeGroup(joined.state, joined.groupInfo)).toBe(
+        admin.pubkey,
+      );
+      await inviteeClient.keyPackages.add(inviteeKp);
+      const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+      const joinedEvent = vi.fn();
+      inviteeClient.groups.on("joined", joinedEvent);
+      const { group } = await inviteeClient.joinGroupFromWelcome({
+        welcomeRumor,
+      });
+      expect(getMarmotGroupView(group.state)?.blossomImage).toEqual(image);
+      expect(await inviteeGroupStateStore.getItem(group.idStr)).not.toBeNull();
+      expect(inviteeClient.groups.loaded).toEqual([group]);
+      expect(joinedEvent).toHaveBeenCalledExactlyOnceWith(group);
+      expect(await inviteeClient.keyPackages.getPrivateKey(ref)).toBeNull();
+      expect((await inviteeClient.keyPackages.get(ref))?.used).toBe(true);
+    },
+  );
+
+  it("retires single-use private material only after successful persisted adoption and can still send", async () => {
+    const admin = testAccount(6);
+    const invitee = testAccount(9);
+    const adminKp = await generateKeyPackage({
+      credential: createCredential(admin.pubkey),
+      ciphersuiteImpl,
+      signer: admin.signer,
+    });
+    const inviteeKp = await generateKeyPackage({
+      credential: createCredential(invitee.pubkey),
+      ciphersuiteImpl,
+      signer: invitee.signer,
+      isLastResort: false,
+    });
+    const { clientState } = await createSimpleGroup(
+      adminKp,
+      ciphersuiteImpl,
+      "Retirement",
+      { adminPubkeys: [admin.pubkey] },
+    );
+    const welcome = await commitInviteeAdd(
+      clientState,
+      inviteeKp.publicPackage,
+    );
+    await inviteeClient.keyPackages.add(inviteeKp);
+    const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+    const welcomeRumor = createWelcomeRumor({
+      welcome,
+      author: admin.pubkey,
+      groupRelays: ["wss://relay.test"],
+      keyPackageEventId: "ab".repeat(32),
+    });
+    const { group } = await inviteeClient.joinGroupFromWelcome({
+      welcomeRumor,
+    });
+    expect(await inviteeClient.keyPackages.getPrivateKey(ref)).toBeNull();
+    expect((await inviteeClient.keyPackages.get(ref))?.used).toBe(true);
+    expect(await inviteeGroupStateStore.getItem(group.idStr)).not.toBeNull();
+    const { createApplicationMessage } = await import("ts-mls");
+    await expect(
+      createApplicationMessage({
+        state: group.state,
+        message: new TextEncoder().encode("after retirement"),
+        context: {
+          cipherSuite: ciphersuiteImpl,
+          authService: marmotAuthService,
+        },
+      }),
+    ).resolves.toBeDefined();
+  });
+
+  it.each(["receipt", "adoption"])(
+    "preserves single-use private material when %s persistence fails",
+    async (point) => {
+      const admin = testAccount(6);
+      const invitee = testAccount(9);
+      const adminKp = await generateKeyPackage({
+        credential: createCredential(admin.pubkey),
+        ciphersuiteImpl,
+        signer: admin.signer,
+      });
+      const inviteeKp = await generateKeyPackage({
+        credential: createCredential(invitee.pubkey),
+        ciphersuiteImpl,
+        signer: invitee.signer,
+        isLastResort: false,
+      });
+      const { clientState } = await createSimpleGroup(
+        adminKp,
+        ciphersuiteImpl,
+        "Persistence",
+        { adminPubkeys: [admin.pubkey] },
+      );
+      const welcome = await commitInviteeAdd(
+        clientState,
+        inviteeKp.publicPackage,
+      );
+      await inviteeClient.keyPackages.add(inviteeKp);
+      const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+      const before = structuredClone(
+        await inviteeClient.keyPackages.getPrivateKey(ref),
+      );
+      const save = vi.spyOn(inviteeGroupStateStore, "setItem");
+      if (point === "receipt")
+        vi.spyOn(
+          inviteeClient.keyPackages,
+          "recordConsumption",
+        ).mockRejectedValueOnce(new Error("receipt write failed"));
+      else save.mockRejectedValueOnce(new Error("adoption write failed"));
+      const welcomeRumor = createWelcomeRumor({
+        welcome,
+        author: admin.pubkey,
+        groupRelays: ["wss://relay.test"],
+        keyPackageEventId: "ab".repeat(32),
+      });
+      await expect(
+        inviteeClient.joinGroupFromWelcome({ welcomeRumor }),
+      ).rejects.toThrow("write failed");
+      expect(await inviteeGroupStateStore.keys()).toEqual([]);
+      expect(await inviteeClient.keyPackages.getPrivateKey(ref)).toEqual(
+        before,
+      );
+      if (point === "receipt") expect(save).not.toHaveBeenCalled();
+      else
+        expect(
+          (await inviteeClient.keyPackages.get(ref))?.consumptionReceipts,
+        ).toHaveLength(1);
+      save.mockRestore();
+    },
+  );
+
   it("joins a current-profile group", async () => {
     const adminAccount = testAccount(6);
     const inviteeAccount = testAccount(9);
@@ -147,6 +458,226 @@ describe("joinFromWelcome account identity proof profile (CUT-02, D-07)", () => 
         group.state.groupContext.extensions,
       ),
     ).toBe("current");
+  });
+
+  it.each([false, true])(
+    "authorizes an inviter at leaf 1 only when admin=%s, preserving rejected bytes",
+    async (isAdmin) => {
+      const adminAccount = testAccount(6);
+      const inviterAccount = testAccount(1);
+      const adminKp = await generateKeyPackage({
+        credential: createCredential(adminAccount.pubkey),
+        ciphersuiteImpl,
+        signer: adminAccount.signer,
+      });
+      const inviterKp = await generateKeyPackage({
+        credential: createCredential(inviterAccount.pubkey),
+        ciphersuiteImpl,
+        signer: inviterAccount.signer,
+      });
+      const inviteeAccount = testAccount(9);
+      const inviteeKp = await generateKeyPackage({
+        credential: createCredential(inviteeAccount.pubkey),
+        ciphersuiteImpl,
+        signer: inviteeAccount.signer,
+      });
+      const { clientState } = await createSimpleGroup(
+        adminKp,
+        ciphersuiteImpl,
+        "Nonadmin",
+        {
+          adminPubkeys: isAdmin
+            ? [adminAccount.pubkey, inviterAccount.pubkey]
+            : [adminAccount.pubkey],
+        },
+      );
+      const inviterWelcome = await commitInviteeAdd(
+        clientState,
+        inviterKp.publicPackage,
+      );
+      const { joinGroup } = await import("ts-mls");
+      const inviterState = await joinGroup({
+        context: {
+          cipherSuite: ciphersuiteImpl,
+          authService: marmotAuthService,
+        },
+        welcome: inviterWelcome,
+        keyPackage: inviterKp.publicPackage,
+        privateKeys: inviterKp.privatePackage,
+      });
+      const welcome = await commitInviteeAdd(
+        inviterState,
+        inviteeKp.publicPackage,
+      );
+      await inviteeClient.keyPackages.add(inviteeKp);
+      const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+      const before = structuredClone(await inviteeClient.keyPackages.get(ref));
+      const { readWelcomeGroupInfo } =
+        await import("../../core/welcome-join.js");
+      const info = await readWelcomeGroupInfo({
+        welcome,
+        keyPackage: inviteeKp,
+        ciphersuiteImpl,
+      });
+      expect(info.signer).toBe(1);
+      expect(info.signature.length).toBeGreaterThan(0);
+      if (isAdmin) {
+        const { group } = await joinAsInvitee(welcome, inviteeKp);
+        expect(group.state.privatePath.leafIndex).toBe(2);
+      } else {
+        await expect(joinAsInvitee(welcome, inviteeKp)).rejects.toThrow(
+          "active admin",
+        );
+        expect(await inviteeGroupStateStore.keys()).toEqual([]);
+      }
+      expect(await inviteeClient.keyPackages.get(ref)).toEqual(before);
+    },
+  );
+
+  it.each([
+    "missing-admin",
+    "orphan-admin",
+    "bad-optional-state",
+    "disbanded",
+    "unsupported-required",
+  ])(
+    "rejects signed %s state before adoption, preserving key material",
+    async (fault) => {
+      const admin = testAccount(6);
+      const invitee = testAccount(9);
+      const adminKp = await generateKeyPackage({
+        credential: createCredential(admin.pubkey),
+        ciphersuiteImpl,
+        signer: admin.signer,
+      });
+      const inviteeKp = await generateKeyPackage({
+        credential: createCredential(invitee.pubkey),
+        ciphersuiteImpl,
+        signer: invitee.signer,
+      });
+      const components = [
+        groupProfileEntry({ name: "Invalid", description: "" }),
+      ];
+      if (fault !== "missing-admin")
+        components.push(
+          adminPolicyEntry(
+            fault === "orphan-admin"
+              ? [admin.pubkey, testAccount(1).pubkey]
+              : [admin.pubkey],
+          ),
+        );
+      if (fault === "bad-optional-state")
+        components.push(
+          componentEntry(
+            GROUP_MESSAGE_RETENTION_COMPONENT_ID,
+            new Uint8Array([1]),
+          ),
+        );
+      if (fault === "disbanded")
+        components.push(groupLifecycleEntry("disbanded"));
+      const { clientState } = await createGroup({
+        creatorKeyPackage: adminKp,
+        ciphersuiteImpl,
+        components,
+        ...(fault === "unsupported-required"
+          ? { requiredComponentIds: [0x8123] }
+          : {}),
+      });
+      const welcome = await commitInviteeAdd(
+        clientState,
+        inviteeKp.publicPackage,
+      );
+      await inviteeClient.keyPackages.add(inviteeKp);
+      const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+      const before = structuredClone(await inviteeClient.keyPackages.get(ref));
+      await expect(joinAsInvitee(welcome, inviteeKp)).rejects.toThrow();
+      expect(await inviteeGroupStateStore.keys()).toEqual([]);
+      expect(await inviteeClient.keyPackages.get(ref)).toEqual(before);
+    },
+  );
+
+  it("rejects duplicate group adoption without changing retained state or keys", async () => {
+    const admin = testAccount(6);
+    const invitee = testAccount(9);
+    const adminKp = await generateKeyPackage({
+      credential: createCredential(admin.pubkey),
+      ciphersuiteImpl,
+      signer: admin.signer,
+    });
+    const inviteeKp = await generateKeyPackage({
+      credential: createCredential(invitee.pubkey),
+      ciphersuiteImpl,
+      signer: invitee.signer,
+    });
+    const { clientState } = await createSimpleGroup(
+      adminKp,
+      ciphersuiteImpl,
+      "Duplicate",
+      { adminPubkeys: [admin.pubkey] },
+    );
+    const welcome = await commitInviteeAdd(
+      clientState,
+      inviteeKp.publicPackage,
+    );
+    const { group } = await joinAsInvitee(welcome, inviteeKp);
+    await inviteeClient.keyPackages.add(inviteeKp);
+    const ref = await calculateKeyPackageRef(inviteeKp.publicPackage);
+    const beforeKey = structuredClone(await inviteeClient.keyPackages.get(ref));
+    const beforeGroup = structuredClone(
+      await inviteeGroupStateStore.getItem(group.idStr),
+    );
+    await expect(joinAsInvitee(welcome, inviteeKp)).rejects.toThrow(
+      "already exists",
+    );
+    expect(await inviteeGroupStateStore.getItem(group.idStr)).toEqual(
+      beforeGroup,
+    );
+    expect(await inviteeClient.keyPackages.get(ref)).toEqual(beforeKey);
+  });
+
+  it("serializes concurrent duplicate adoption before recording cleanup intent", async () => {
+    const admin = testAccount(6);
+    const invitee = testAccount(9);
+    const adminKp = await generateKeyPackage({
+      credential: createCredential(admin.pubkey),
+      ciphersuiteImpl,
+      signer: admin.signer,
+    });
+    const inviteeKp = await generateKeyPackage({
+      credential: createCredential(invitee.pubkey),
+      ciphersuiteImpl,
+      signer: invitee.signer,
+    });
+    const { clientState } = await createSimpleGroup(
+      adminKp,
+      ciphersuiteImpl,
+      "Concurrent",
+      { adminPubkeys: [admin.pubkey] },
+    );
+    const welcome = await commitInviteeAdd(
+      clientState,
+      inviteeKp.publicPackage,
+    );
+    const keyPackageRef = await calculateKeyPackageRef(inviteeKp.publicPackage);
+    const beforeAdopt = vi.fn(async () => {});
+    const options = {
+      welcome,
+      ciphersuiteImpl,
+      candidates: [{ ...inviteeKp, keyPackageRef, hasMatchingSecret: true }],
+      beforeAdopt,
+    };
+    const results = await Promise.allSettled([
+      inviteeClient.groups.joinFromWelcome(options),
+      inviteeClient.groups.joinFromWelcome(options),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    expect(beforeAdopt).toHaveBeenCalledTimes(1);
+    expect(await inviteeGroupStateStore.keys()).toHaveLength(1);
   });
 
   it("GRP-03: rejects a Welcome into a group that does not require 0x8009 without persisting it", async () => {

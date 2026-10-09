@@ -12,9 +12,8 @@ import {
 } from "ts-mls";
 import { encodeContent } from "../utils/encoding.js";
 import { unixNow } from "../utils/nostr.js";
-import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
 import { isGreaseValue } from "./grease.js";
-import { calculateKeyPackageRef } from "./key-package.js";
+import { calculateKeyPackageRef, isReusableKeyPackage } from "./key-package.js";
 import {
   ADDRESSABLE_KEY_PACKAGE_KIND,
   KEY_PACKAGE_APP_COMPONENTS_TAG,
@@ -23,7 +22,7 @@ import {
   KEY_PACKAGE_EXTENSIONS_TAG,
   KEY_PACKAGE_MLS_VERSION_TAG,
   KEY_PACKAGE_PROPOSALS_TAG,
-  KEY_PACKAGE_RELAYS_TAG,
+  LAST_RESORT_EXTENSION_TYPE,
 } from "./protocol.js";
 import { SUPPORTED_APP_COMPONENT_IDS } from "./components/ids.js";
 
@@ -35,7 +34,7 @@ export type CreateKeyPackageEventOptions = {
    * throwing {@link MissingSlotIdentifierError} when none is available.
    */
   identifier: string;
-  /** Relay URLs to advertise in the event */
+  /** @deprecated Relay destinations belong to the transport and are never emitted as tags. */
   relays?: string[];
   client?: string;
   /**
@@ -46,6 +45,14 @@ export type CreateKeyPackageEventOptions = {
    */
   protected?: boolean;
 };
+
+/** Require a stable publication slot generated once from 32 random bytes. */
+export function validateKeyPackageSlot(identifier: string): void {
+  if (typeof identifier !== "string" || !/^[0-9a-f]{64}$/.test(identifier))
+    throw new Error(
+      "Invalid KeyPackage publication slot: expected exactly 64 lowercase hex characters. Migrate device labels by generating 32 random bytes once, encoding them as lowercase hex, and persisting that stable slot.",
+    );
+}
 
 /**
  * Creates an addressable key package event (kind 30443) from a key package.
@@ -62,7 +69,9 @@ export function createKeyPackageEvent(
 async function createKeyPackageEventInternal(
   options: CreateKeyPackageEventOptions,
 ): Promise<EventTemplate> {
-  const { keyPackage, relays, client } = options;
+  const { keyPackage, client } = options;
+  validateKeyPackageSlot(options.identifier);
+  isReusableKeyPackage(keyPackage);
 
   // Publish the KeyPackage wrapped in an MLSMessage with wire_format
   // mls_key_package (RFC 9420 §6). The kind-30443 content is specified as the
@@ -111,7 +120,7 @@ async function createKeyPackageEventInternal(
   const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
     // Parse the hex value back to number to check if it's a GREASE value
     const extType = parseInt(hexValue);
-    return !isGreaseValue(extType);
+    return !isGreaseValue(extType) && extType !== LAST_RESORT_EXTENSION_TYPE;
   });
 
   // Get the protocol version - keyPackage.version is a numeric ProtocolVersionValue
@@ -169,14 +178,6 @@ async function createKeyPackageEventInternal(
 
   // Add client tag if provided
   if (client) tags.push([KEY_PACKAGE_CLIENT_TAG, client]);
-
-  // Add relay tags if provided
-  if (relays && relays.length > 0) {
-    const validRelays = relays.filter(isValidRelayUrl).map(normalizeRelayUrl);
-    if (validRelays.length > 0) {
-      tags.push([KEY_PACKAGE_RELAYS_TAG, ...validRelays]);
-    }
-  }
 
   return {
     kind: ADDRESSABLE_KEY_PACKAGE_KIND,

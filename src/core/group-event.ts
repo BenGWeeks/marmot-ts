@@ -14,6 +14,8 @@ export type CreateGroupEventOptions = {
   state: ClientState;
   /** The ciphersuite implementation */
   ciphersuite: CiphersuiteImpl;
+  /** Application-only source metadata. Encrypted bytes alone imply no expiry. */
+  metadata?: { readonly expiration?: bigint };
 };
 
 /**
@@ -40,6 +42,14 @@ export async function createGroupEvent(
     content,
     tags: [[nostrTransportBinding.groupIdTag, groupId]],
   };
+  const expiration = options.metadata?.expiration;
+  if (
+    typeof expiration === "bigint" &&
+    expiration >= 0n &&
+    expiration <= (1n << 64n) - 1n
+  ) {
+    draft.tags.push(["expiration", expiration.toString()]);
+  }
 
   // Ephemeral keypair for signing — distinct from the encryption keypair (`transports/nostr.md`: fresh per-event ephemeral key)
   const ephemeralSecretKey = generateSecretKey();

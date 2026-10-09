@@ -21,8 +21,12 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { PrivateKeyAccount } from "applesauce-accounts/accounts";
 
 import { createCredential } from "../credential.js";
-import { calculateKeyPackageRef, generateKeyPackage } from "../key-package.js";
-import { appDataDictionaryExtensionType } from "ts-mls";
+import {
+  calculateKeyPackageRef,
+  generateKeyPackage,
+  isReusableKeyPackage,
+} from "../key-package.js";
+import { appDataDictionaryExtensionType, getAppDataDictionary } from "ts-mls";
 import {
   decodeAuthorizationProof,
   AuthorizationProofError,
@@ -39,6 +43,166 @@ import {
 import { validateKeyPackageAccountIdentityProof } from "../components/account-identity-proof.js";
 import { LAST_RESORT_EXTENSION_TYPE } from "../protocol.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
+import { makeAppDataDictionaryExtension, type KeyPackage } from "ts-mls";
+import { createKeyPackageEvent } from "../key-package-event.js";
+import { ensureMarmotCapabilities } from "../capabilities.js";
+
+describe("canonical KeyPackage publication", () => {
+  it.each([
+    "desktop",
+    "AB".repeat(32),
+    "a".repeat(63),
+    "a".repeat(65),
+    "gg".repeat(32),
+    " " + "a".repeat(64),
+  ])("rejects invalid publication slot %s", async (identifier) => {
+    const { kp } = await fixture();
+    await expect(
+      createKeyPackageEvent({ keyPackage: kp, identifier }),
+    ).rejects.toThrow("32 random bytes");
+  });
+  async function fixture() {
+    const account = testAccount(5);
+    const ciphersuiteImpl = await getCiphersuiteImpl(
+      "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519",
+      defaultCryptoProvider,
+    );
+    const options = {
+      credential: createCredential(account.pubkey),
+      ciphersuiteImpl,
+      signer: account.signer,
+    };
+    return { options, kp: (await generateKeyPackage(options)).publicPackage };
+  }
+
+  it("rejects legacy-only reuse instead of classifying it as single-use", async () => {
+    const { kp } = await fixture();
+    expect(() =>
+      isReusableKeyPackage({
+        ...kp,
+        extensions: [
+          makeCustomExtension({
+            extensionType: 0x000a,
+            extensionData: new Uint8Array(),
+          }),
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects duplicate dictionaries and trailing dictionary bytes", async () => {
+    const { kp } = await fixture();
+    expect(() =>
+      isReusableKeyPackage({
+        ...kp,
+        extensions: [...kp.extensions, ...kp.extensions],
+      }),
+    ).toThrow();
+    const dictionary = kp.extensions.find(
+      (e) => e.extensionType === appDataDictionaryExtensionType,
+    )! as CustomExtension;
+    expect(() =>
+      isReusableKeyPackage({
+        ...kp,
+        extensions: [
+          {
+            ...dictionary,
+            extensionData: new Uint8Array([...dictionary.extensionData, 0]),
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("rejects duplicate, unsorted, nonempty and misplaced reusable entries", async () => {
+    const { kp } = await fixture();
+    for (const bytes of [
+      [6, 0, 4, 0, 0, 4, 0],
+      [6, 0, 9, 0, 0, 4, 0],
+      [4, 0, 4, 1, 1],
+    ]) {
+      const malformed: KeyPackage = {
+        ...kp,
+        extensions: [
+          makeCustomExtension({
+            extensionType: 6,
+            extensionData: new Uint8Array(bytes),
+          }),
+        ],
+      };
+      expect(() => isReusableKeyPackage(malformed)).toThrow();
+    }
+    expect(() =>
+      isReusableKeyPackage({
+        ...kp,
+        leafNode: {
+          ...kp.leafNode,
+          extensions: [
+            makeAppDataDictionaryExtension([
+              { componentId: 4, data: new Uint8Array() },
+            ]),
+          ],
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects malformed caller dictionaries before proof signing", async () => {
+    const { options } = await fixture();
+    const sign = vi.spyOn(options.signer, "signEvent");
+    let rejected = false;
+    try {
+      await generateKeyPackage({
+        ...options,
+        extensions: [
+          makeAppDataDictionaryExtension([
+            { componentId: 4, data: new Uint8Array([1]) },
+          ]),
+        ],
+      });
+    } catch {
+      rejected = true;
+    }
+    expect(rejected).toBe(true);
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  it("preserves unrelated entries and produces no relay or legacy capability tags", async () => {
+    const { options } = await fixture();
+    const kp = (
+      await generateKeyPackage({
+        ...options,
+        extensions: [
+          makeAppDataDictionaryExtension([
+            { componentId: 0x9000, data: new Uint8Array([8]) },
+          ]),
+        ],
+      })
+    ).publicPackage;
+    expect(isReusableKeyPackage(kp)).toBe(true);
+    expect(
+      getAppDataDictionary(kp.extensions)?.find((e) => e.componentId === 0x9000)
+        ?.data,
+    ).toEqual(new Uint8Array([8]));
+    const event = await createKeyPackageEvent({
+      keyPackage: kp,
+      identifier: "ab".repeat(32),
+      relays: ["wss://relay.test"],
+    });
+    expect(event.tags.some((t) => t[0] === "relays" || t[0] === "relay")).toBe(
+      false,
+    );
+    expect(
+      event.tags.find((t) => t[0] === "mls_extensions")?.slice(1),
+    ).not.toContain("0x000a");
+    expect(
+      ensureMarmotCapabilities({
+        ...kp.leafNode.capabilities,
+        extensions: [6, 10],
+      }).extensions,
+    ).not.toContain(10);
+  });
+});
 
 // The legacy `marmot.account-identity-proof.v2` custom LeafNode extension (`0xf2f1`),
 // whose module was deleted in the Phase 7 clean cut (`ef756c8`). Referenced here only as
@@ -273,7 +437,7 @@ describe("generateKeyPackage", () => {
     expect(capabilities).toContain(appDataDictionaryExtensionType);
   });
 
-  it("should include last_resort extension by default", async () => {
+  it("should include canonical empty-data last_resort component by default", async () => {
     const credential = createCredential(validPubkey);
     const ciphersuiteImpl = await getCiphersuiteImpl(
       SUITE,
@@ -292,7 +456,12 @@ describe("generateKeyPackage", () => {
         ext.extensionType === LAST_RESORT_EXTENSION_TYPE,
     );
 
-    expect(hasLastResort).toBe(true);
+    expect(hasLastResort).toBe(false);
+    expect(
+      getAppDataDictionary(keyPackage.publicPackage.extensions)?.find(
+        (entry) => entry.componentId === 0x0004,
+      )?.data,
+    ).toEqual(new Uint8Array());
   });
 
   it("should omit last_resort extension when isLastResort=false", async () => {
@@ -349,7 +518,7 @@ describe("generateKeyPackage", () => {
     expect(capabilities).toContain(appDataDictionaryExtensionType);
   });
 
-  it("should accept custom extensions and still ensure last_resort extension", async () => {
+  it("should accept custom extensions and still ensure canonical last_resort component", async () => {
     const credential = createCredential(validPubkey);
     const ciphersuiteImpl = await getCiphersuiteImpl(
       SUITE,
@@ -384,7 +553,12 @@ describe("generateKeyPackage", () => {
     );
 
     expect(hasCustom).toBe(true);
-    expect(hasLastResort).toBe(true);
+    expect(hasLastResort).toBe(false);
+    expect(
+      getAppDataDictionary(keyPackage.publicPackage.extensions)?.find(
+        (entry) => entry.componentId === 0x0004,
+      )?.data,
+    ).toEqual(new Uint8Array());
   });
 
   it("should accept custom extensions and omit last_resort when isLastResort=false", async () => {

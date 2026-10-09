@@ -43,11 +43,13 @@ import {
   decodeComponentsList,
   decodeEncryptedMediaPolicyV1,
   decodeGroupAvatarUrlV1,
+  decodeGroupBlossomImage,
   decodeGroupProfileV1,
   decodeMessageRetentionV1,
   decodeGroupLifecycleV1,
   decodeNostrRoutingV1,
   getAdminPolicy,
+  getComponentData,
   getEncryptedMediaPolicy,
   getGroupAvatarUrl,
   getGroupProfile,
@@ -55,7 +57,11 @@ import {
   getGroupLifecycle,
   getNostrRouting,
 } from "./components/index.js";
-import type { GroupProtocolLifecycleValue } from "./components/index.js";
+import type {
+  GroupBlossomImage,
+  GroupProtocolLifecycleValue,
+} from "./components/index.js";
+import { getGroupImageSource, type GroupImageSource } from "./group-image.js";
 import { getGroupMemberPubkeys } from "./group-members.js";
 
 /** Default ClientConfig for Marmot. */
@@ -89,6 +95,10 @@ export interface MarmotGroupView {
   relays: string[];
   /** Group avatar URL (`group.avatar-url.v1`, `0x8007`), if set. */
   avatarUrl?: string;
+  /** Typed canonical Blossom component, including its explicit clear state. */
+  blossomImage?: GroupBlossomImage;
+  /** URL-first rendering source; fetching failures cannot change this selection. */
+  imageSource: GroupImageSource;
   /**
    * Group encrypted-media policy (`group.encrypted-media.v1`, `0x8008`): the
    * group-scoped blob-store endpoints and format, if set.
@@ -114,7 +124,7 @@ export interface MarmotGroupComponentInfo {
   name: string;
   /** Raw component data byte length. */
   dataLength: number;
-  /** Raw component data as hex for protocol debugging. */
+  /** Raw component data as hex for protocol debugging; image secrets are redacted. */
   dataHex: string;
   /** Decoded known component payload. Omitted when the component is unknown or invalid. */
   decoded?: MarmotGroupDecodedComponent;
@@ -213,6 +223,13 @@ function decodeGroupComponent(
       return decodeAgentTextStreamQuicPolicyV1(data);
     case GROUP_AVATAR_URL_COMPONENT_ID:
       return decodeGroupAvatarUrlV1(data);
+    case GROUP_BLOSSOM_IMAGE_COMPONENT_ID: {
+      const image = decodeGroupBlossomImage(data);
+      // Inspection is diagnostic output: do not expose MLS-protected keys.
+      return image.kind === "empty"
+        ? { kind: "empty" }
+        : { kind: "present", mediaType: image.mediaType };
+    }
     case GROUP_ENCRYPTED_MEDIA_COMPONENT_ID:
       return decodeEncryptedMediaPolicyV1(data);
     case GROUP_LIFECYCLE_COMPONENT_ID:
@@ -239,7 +256,10 @@ function getGroupComponentInfos(clientState: ClientState | GroupInfo): {
       idHex: componentIdHex(entry.componentId),
       name: COMPONENT_NAMES.get(entry.componentId) ?? "unknown",
       dataLength: entry.data.length,
-      dataHex: bytesToHex(entry.data),
+      dataHex:
+        entry.componentId === GROUP_BLOSSOM_IMAGE_COMPONENT_ID
+          ? "[redacted]"
+          : bytesToHex(entry.data),
     };
 
     try {
@@ -268,11 +288,19 @@ export function getMarmotGroupView(
     const adminPubkeys = getAdminPolicy(extensions);
     const routing = getNostrRouting(extensions);
     const avatar = getGroupAvatarUrl(extensions);
+    const blossomBytes = getComponentData(
+      extensions,
+      GROUP_BLOSSOM_IMAGE_COMPONENT_ID,
+    );
+    const blossomImage = blossomBytes
+      ? decodeGroupBlossomImage(blossomBytes)
+      : undefined;
     const encryptedMedia = getEncryptedMediaPolicy(extensions);
     const messageRetention = getMessageRetention(extensions);
     const protocolLifecycle = getGroupLifecycle(extensions);
 
-    if (!profile && !adminPubkeys && !routing) return null;
+    if (!profile && !adminPubkeys && !routing && !avatar && !blossomImage)
+      return null;
 
     return {
       nostrGroupId: routing?.nostrGroupId,
@@ -281,6 +309,8 @@ export function getMarmotGroupView(
       adminPubkeys: adminPubkeys ?? [],
       relays: routing?.relays ?? [],
       avatarUrl: avatar?.url,
+      blossomImage,
+      imageSource: getGroupImageSource(clientState),
       encryptedMedia,
       messageRetention,
       protocolLifecycle,

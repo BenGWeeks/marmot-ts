@@ -166,7 +166,6 @@ describe("proposeInviteUser account identity proof verification", () => {
     // A valid leaf, but the KeyPackage's own (not the leaf's) extensions
     // carry a dictionary with a 0x8009 entry -- PROOF-05.
     kp.publicPackage.extensions = [
-      ...kp.publicPackage.extensions,
       rebuildLeafDictionary([
         componentEntry(
           ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,

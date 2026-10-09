@@ -165,7 +165,7 @@ const myPubkey = await client.signer.getPublicKey();
 ```
 
 ::: warning Spec deviation
-The spec requires the slot id to be random 32-byte hex (`transports/nostr.md`). marmot-ts accepts any string as `clientId`, so following the pattern above is up to you.
+The spec requires the slot id to be random 32-byte hex (`transports/nostr.md`). marmot-ts rejects identifiers unless they are exactly 64 lowercase hex characters. Persist the generated slot; migrate device labels by generating a new conformant slot.
 :::
 
 ::: tip Multi-Account Applications
