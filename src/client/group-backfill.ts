@@ -87,7 +87,7 @@ export function backfillProgressKey(groupIdHex: string, relay: string): string {
 
 /**
  * Resumable paging progress of one relay: every event the relay held dated in
- * `[from, to]` (inclusive) was fetched and durably ingested by an earlier,
+ * `[from, to]` (inclusive, whole seconds) was fetched and durably ingested by an earlier,
  * page-capped backfill. Recorded only while that relay's backfill is
  * incomplete, and removed once a backfill of the relay completes.
  */
@@ -207,8 +207,12 @@ export async function fetchPagedBackfill(
     let until: number | undefined;
     let steppedPastBoundary = false;
     let saturated = false;
-    // Largest page this relay has returned: its effective page cap.
-    let effectiveCap = 0;
+    // Per-request cap this relay has been proven to enforce: a page is only
+    // "full" at `pageSize`, or at the length of an earlier page the relay
+    // truncated (the next, narrower request still found new events). The
+    // largest page seen is not proof — a short history is short too.
+    let confirmedCap = options.pageSize;
+    let previousLength: number | undefined;
     const done = () =>
       ({
         collected,
@@ -224,7 +228,6 @@ export async function fetchPagedBackfill(
         ...(until !== undefined ? { until } : {}),
       });
       if (!events.length) return done();
-      effectiveCap = Math.max(effectiveCap, events.length);
 
       let added = 0;
       let oldest = Number.POSITIVE_INFINITY;
@@ -238,6 +241,10 @@ export async function fetchPagedBackfill(
       }
 
       if (added > 0) {
+        // This request is narrower than the previous one yet found new
+        // events, so the previous page was truncated at the relay's cap.
+        if (previousLength !== undefined)
+          confirmedCap = Math.min(confirmedCap, previousLength);
         until = oldest;
         steppedPastBoundary = false;
       } else if (steppedPastBoundary) {
@@ -248,7 +255,7 @@ export async function fetchPagedBackfill(
         // Everything at or after `until` is already collected. A full page
         // from one second means that second may hold more events than one
         // page can return; they cannot be reached, so flag the relay.
-        if (oldest === newest && events.length >= effectiveCap) {
+        if (oldest === newest && events.length >= confirmedCap) {
           log("relay %s saturated second %d", relay, oldest);
           saturated = true;
         }
@@ -258,9 +265,12 @@ export async function fetchPagedBackfill(
       }
       // Reached a range an earlier capped backfill already fetched: resume
       // below it instead of re-reading it.
+      previousLength = events.length;
       if (resume && until <= resume.to && until > resume.from) {
         until = resume.from;
         steppedPastBoundary = false;
+        // The next request is not narrower than this one: no cap evidence.
+        previousLength = undefined;
       }
       if (options.since !== undefined && until < options.since) return done();
     }

@@ -1201,7 +1201,8 @@ export class GroupsManager<
   /**
    * Records each relay's resumable paging progress after a backfill has been
    * ingested: a capped relay stores the range now fetched (`[until, walk
-   * start]`, ended below the oldest event still held in memory), a completed
+   * start]`, ended strictly below the second of the oldest event still held
+   * in memory), a completed
    * relay drops its record. Saturated or failed relays keep any earlier
    * record unchanged. Persistence failures are logged, never thrown.
    */
@@ -1220,15 +1221,22 @@ export class GroupsManager<
             await this.#ingestStateStore.removeItem(key);
         } else if (outcome.status === "capped") {
           const from = outcome.until;
+          // End strictly below the oldest held event: its whole second must
+          // be re-read (a jump inside it could skip same-second events).
+          const oldestHeld = oldestCreatedAt(held, from);
           const to = Math.min(
             walkStart,
-            oldestCreatedAt(held, from) ?? walkStart,
+            oldestHeld === undefined ? walkStart : oldestHeld - 1,
           );
           if (from <= to)
             await this.#ingestStateStore.setItem(
               key,
               encodeBackfillProgress({ from, to }),
             );
+          // Nothing durable to record: drop any older range, which may
+          // cover the held event too.
+          else if (recorded.has(outcome.relay))
+            await this.#ingestStateStore.removeItem(key);
         }
       } catch (err) {
         log("connect: failed to persist backfill progress: %o", err);

@@ -11,6 +11,7 @@ import {
   backfillCursorKey,
   backfillProgressKey,
   decodeBackfillCursor,
+  decodeBackfillProgress,
   encodeBackfillCursor,
   fetchPagedBackfill,
   nextBackfillCursor,
@@ -189,6 +190,46 @@ describe("fetchPagedBackfill", () => {
     expect(result.relays).toEqual([{ relay: RELAY, status: "saturated" }]);
     // The walk still continues below the saturated second.
     expect(result.events.map((e) => e.created_at)).toContain(699);
+  });
+
+  it("does not report a short history as saturated", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set("wss://one", [fakeEvent(1, 800)]);
+    // A short history entirely within one second, well under `pageSize`.
+    network.relayEvents.set(
+      "wss://same-second",
+      [2, 3, 4].map((id) => fakeEvent(id, 900)),
+    );
+
+    const result = await fetchPagedBackfill(
+      network,
+      ["wss://one", "wss://same-second"],
+      {},
+      { pageSize: 500, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(result.events).toHaveLength(4);
+  });
+
+  it("detects saturation at a relay cap confirmed below `pageSize`", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set(RELAY, [
+      fakeEvent(1, 701),
+      ...[2, 3, 4, 5].map((id) => fakeEvent(id, 700)),
+      fakeEvent(6, 699),
+    ]);
+    // The relay returns at most 2 events per request, whatever the limit.
+    network.relayCaps.set(RELAY, 2);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 10, maxPages: 20 },
+    );
+
+    expect(result.relays).toEqual([{ relay: RELAY, status: "saturated" }]);
   });
 
   it("resumes below a range an earlier capped backfill fetched", async () => {
@@ -446,6 +487,41 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
         await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
       ),
     ).toBe(newest - 30);
+  });
+
+  it("ends recorded progress strictly below an event still held", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 6, newest);
+    // An undecryptable event (pooled in memory) inside the capped range.
+    const other = makeManager(network);
+    const otherGroup = await other.create("Other", { relays: [RELAY] });
+    await other.send(otherGroup.id, {
+      kind: "applicationMessage",
+      payload: new TextEncoder().encode("foreign"),
+    });
+    const foreign = network.events.at(-1)!;
+    foreign.tags = groupEvents[0]!.tags.map((tag) => [...tag]);
+    // Its own second (no other event shares it), newest in the history.
+    foreign.created_at = newest + 1;
+
+    (
+      await manager.connect(group.id, {
+        backfillPageSize: 2,
+        backfillMaxPages: 3,
+        backfillSlackSeconds: 0,
+      })
+    ).unsubscribe();
+
+    expect(group.pendingEvents().map((e) => e.id)).toContain(foreign.id);
+    const progress = decodeBackfillProgress(
+      await ingestStateStore.getItem(backfillProgressKey(group.idStr, RELAY)),
+    );
+    // The held event's whole second must be re-read on the next connect, so
+    // the range may not include it, even with zero slack.
+    expect(progress).toBeDefined();
+    expect(progress!.to).toBe(newest);
   });
 
   it("completes a page-capped backfill over successive connects", async () => {
