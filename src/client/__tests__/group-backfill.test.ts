@@ -116,6 +116,31 @@ async function groupWithHistory(
 }
 
 describe("fetchPagedBackfill", () => {
+  it("stops paging once the signal is aborted", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set(
+      RELAY,
+      Array.from({ length: 6 }, (_, i) => fakeEvent(i + 1, 1000 + i)),
+    );
+    const controller = new AbortController();
+    const request = network.request.bind(network);
+    network.request = async (relays, filters) => {
+      controller.abort();
+      return request(relays, filters);
+    };
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      { kinds: [445], "#h": ["aa"] },
+      { pageSize: 2, maxPages: 20, signal: controller.signal },
+    );
+
+    expect(network.requests).toHaveLength(1);
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([{ relay: RELAY, status: "failed" }]);
+  });
+
   it("pages each relay independently down to its oldest event", async () => {
     const network = new PagingNetwork();
     const a = Array.from({ length: 7 }, (_, i) => fakeEvent(i + 1, 1000 + i));
@@ -462,6 +487,33 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
         await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
       ),
     ).toBe(newest);
+  });
+
+  it("stops paging when the connection is aborted mid-backfill", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const { manager, group, ingestStateStore } = await groupWithHistory(
+      network,
+      6,
+      nowSeconds() - 60,
+    );
+    network.requests.length = 0;
+    const controller = new AbortController();
+    const request = network.request.bind(network);
+    network.request = async (relays, filters) => {
+      controller.abort();
+      return request(relays, filters);
+    };
+
+    const sub = await manager.connect(group.id, {
+      backfillPageSize: 2,
+      signal: controller.signal,
+    });
+    sub.unsubscribe();
+
+    expect(network.requests).toHaveLength(1);
+    expect(
+      await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+    ).toBeNull();
   });
 
   it("keeps the cursor when the page cap leaves history unfetched", async () => {

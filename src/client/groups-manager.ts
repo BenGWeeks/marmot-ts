@@ -1001,10 +1001,13 @@ export class GroupsManager<
         this.#admissions.delete(group.idStr);
     };
     let cancelled = false;
+    // Stops a paged backfill once the connection is cancelled (abort/disband).
+    const paging = new AbortController();
     let sub: Unsubscribable | undefined;
     const unsubscribe = () => {
       if (cancelled) return;
       cancelled = true;
+      paging.abort();
       options?.signal?.removeEventListener("abort", unsubscribe);
       group.off("disbanded", unsubscribe);
       sub?.unsubscribe();
@@ -1137,6 +1140,7 @@ export class GroupsManager<
         pageSize,
         maxPages,
         resume,
+        signal: paging.signal,
       });
       const drained = await admit(backfill.events);
       // Events the group holds only in memory (undecryptable-so-far pool and

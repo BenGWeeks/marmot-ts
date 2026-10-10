@@ -130,7 +130,7 @@ KeyPackage discovery uses the account's kind 10002 NIP-65 write relays (`getNip6
 
 `await client.groups.connect(groupId, options?)` backfills kind 445 events, fully drains that batch, then installs a live subscription. It returns an `Unsubscribable`. `client.groups.connectAll(options?)` returns its handle immediately and follows the set of loaded groups, starting and stopping their connections as groups are loaded, joined, removed, or unloaded.
 
-Both APIs accept `{ signal?: AbortSignal, fallbackRelays?: string[] }`. Group relays take precedence over fallback relays; groups with neither are skipped. Use an `AbortSignal` to stop a direct connection while its backfill request is still pending:
+Both APIs accept `{ signal?: AbortSignal, fallbackRelays?: string[] }`, plus the backfill bounds `backfillSlackSeconds`, `backfillPageSize` and `backfillMaxPages` (see [Bounded backfill](/client/marmot-client#bounded-backfill)). Group relays take precedence over fallback relays; groups with neither are skipped. Use an `AbortSignal` to stop a direct connection while its backfill request is still pending:
 
 ```typescript
 const controller = new AbortController();

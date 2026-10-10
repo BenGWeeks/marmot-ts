@@ -151,6 +151,8 @@ export interface PagedBackfillOptions {
    * connects. Pass `to` already reduced by any slack.
    */
   resume?: ReadonlyMap<string, BackfillProgress>;
+  /** Stops paging once aborted; unfinished relays then report `failed`. */
+  signal?: AbortSignal;
 }
 
 /** How one relay's paged walk ended. */
@@ -229,6 +231,8 @@ export async function fetchPagedBackfill(
           : { relay, status: "complete" as const },
       }) as const;
     for (let page = 0; page < options.maxPages; page++) {
+      if (options.signal?.aborted)
+        return { collected, outcome: { relay, status: "failed" as const } };
       const events = await network.request([relay], {
         ...filter,
         limit: options.pageSize,
