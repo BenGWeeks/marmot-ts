@@ -210,7 +210,7 @@ When a relay hits `backfillMaxPages`, the client also records how far that relay
 Limits:
 
 - The cursor follows `created_at`, which the publisher chooses. An event that reaches a relay more than `backfillSlackSeconds` after the date it carries can be missed by both the backfill and the live subscription.
-- Events held in memory hold the cursor back, so a restart re-fetches them, but by at most seven days below both the previous cursor and the newest fetched event. An undecryptable event dated far in the past therefore cannot force a full backfill on every connect.
+- Events held in memory hold the cursor back, so a restart re-fetches them, but by at most seven days before the newest fetched event. An undecryptable event dated far in the past therefore cannot force a long re-fetch on every connect, and a held event dated more than seven days before newer traffic is not re-fetched after a restart.
 - A single-second page counts as possibly truncated when it holds at least `backfillPageSize` events, or at least 100 events and the relay has not returned a longer response during the same walk. Relays do not report their result cap, so one that caps responses below 100 events can still hide events that share a second.
 - A relay that fails on every connect is re-read from its old cursor (or in full) each time, bounded by `backfillMaxPages`.
 - The `request` adapter must reject when a relay fails or times out (see [network](/client/network)). An adapter that resolves `[]` instead makes the relay look empty, and a relay that stops part-way through its history may then be recorded as complete.

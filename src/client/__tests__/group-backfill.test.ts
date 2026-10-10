@@ -567,23 +567,15 @@ describe("nextBackfillCursor", () => {
   it("does not let a held event dated far in the past pin the cursor", () => {
     const now = 1_800_000_000;
     const ancient = fakeEvent(2, 0);
-    expect(
-      nextBackfillCursor({
-        ingested: [fakeEvent(1, now - 10)],
-        held: [ancient],
-        previous: undefined,
-        nowSeconds: now,
-      }),
-    ).toBe(now - 10 - BACKFILL_MAX_HOLD_BACK_SECONDS);
-    // An older previous cursor still bounds how far it can be pulled back.
-    expect(
-      nextBackfillCursor({
-        ingested: [fakeEvent(1, now - 10)],
-        held: [fakeEvent(3, now - 20 * 86_400), ancient],
-        previous: now - 30 * 86_400,
-        nowSeconds: now,
-      }),
-    ).toBe(now - 30 * 86_400);
+    for (const previous of [undefined, now - 30 * 86_400])
+      expect(
+        nextBackfillCursor({
+          ingested: [fakeEvent(1, now - 10)],
+          held: [ancient],
+          previous,
+          nowSeconds: now,
+        }),
+      ).toBe(now - 10 - BACKFILL_MAX_HOLD_BACK_SECONDS);
   });
 
   it("never moves backwards without a held event", () => {
@@ -922,7 +914,10 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     const restarted = makeManager(network, stores);
     const reloaded = await restarted.get(group.id);
     const ingestSpy = vi.spyOn(reloaded, "ingest");
-    (await restarted.connect(group.id)).unsubscribe();
+    // Zero slack: only the cursor itself keeps the retained event in range.
+    (
+      await restarted.connect(group.id, { backfillSlackSeconds: 0 })
+    ).unsubscribe();
     const backfilled = ingestSpy.mock.calls[0]![0] as NostrEvent[];
     expect(backfilled.map((e) => e.id)).toContain(older.id);
 
@@ -1111,5 +1106,90 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     all.unsubscribe();
     expect(network.requests.length).toBeGreaterThan(1);
     expect(network.requests.every((r) => r.filter.limit === 2)).toBe(true);
+  });
+
+  it("ends recorded progress below input retained during a commit publication", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 6, newest);
+    const retained = await foreignEvent(network, groupEvents[0]!, newest + 1);
+    network.events.push(retained);
+    let releasePublish!: () => void;
+    const publishing = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    const publish = network.publish.bind(network);
+    network.publish = async (relays, event) => {
+      await publishing;
+      return publish(relays, event);
+    };
+    const update = group.selfUpdate();
+    await vi.waitFor(() => expect(group.lifecycle).toBe("PendingPublish"));
+
+    (
+      await manager.connect(group.id, {
+        backfillPageSize: 2,
+        backfillMaxPages: 3,
+        backfillSlackSeconds: 0,
+      })
+    ).unsubscribe();
+
+    expect(group.session.retainedEvents().map((e) => e.id)).toContain(
+      retained.id,
+    );
+    const progress = decodeBackfillProgress(
+      await ingestStateStore.getItem(backfillProgressKey(group.idStr, RELAY)),
+    );
+    expect(progress).toBeDefined();
+    expect(progress!.to).toBe(newest);
+
+    releasePublish();
+    await update;
+  });
+
+  it("leaves no backfill record behind a group destroyed while it settles", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const { manager, group, ingestStateStore } = await groupWithHistory(
+      network,
+      3,
+      nowSeconds() - 60,
+    );
+    // A capped first connect records progress, which the next one removes.
+    (
+      await manager.connect(group.id, {
+        backfillPageSize: 1,
+        backfillMaxPages: 1,
+      })
+    ).unsubscribe();
+    let reachedRemove!: () => void;
+    const removing = new Promise<void>((resolve) => {
+      reachedRemove = resolve;
+    });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const removeItem = ingestStateStore.removeItem.bind(ingestStateStore);
+    let gated = false;
+    ingestStateStore.removeItem = async (key) => {
+      if (!gated) {
+        gated = true;
+        reachedRemove();
+        await removeGate;
+      }
+      return removeItem(key);
+    };
+
+    const reconnect = manager.connect(group.id);
+    await removing;
+    await manager.destroy(group.id);
+    releaseRemove();
+    await reconnect.then((sub) => sub.unsubscribe());
+
+    const records = (await ingestStateStore.keys()).filter((key) =>
+      key.startsWith(`${group.idStr}/ingest/backfill-`),
+    );
+    expect(records).toEqual([]);
   });
 });

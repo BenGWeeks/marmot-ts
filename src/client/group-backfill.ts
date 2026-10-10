@@ -24,10 +24,10 @@ export const DEFAULT_BACKFILL_MAX_PAGES = 50;
  */
 export const BACKFILL_FUTURE_SKEW_SECONDS = 5 * 60;
 /**
- * Furthest an event held in memory can pull a cursor back (seconds): below
- * both the previous cursor and this long before the newest fetched event, a
- * held event no longer holds the cursor. An undecryptable event dated far in
- * the past must not force a full backfill on every connect.
+ * Furthest an event held in memory can hold a cursor back (seconds): an
+ * event dated more than this before the newest fetched event no longer holds
+ * the cursor. An undecryptable event dated far in the past must not force a
+ * long re-fetch on every connect.
  */
 export const BACKFILL_MAX_HOLD_BACK_SECONDS = 7 * 24 * 60 * 60;
 
@@ -456,8 +456,8 @@ export async function fetchPagedBackfill(
  * retained while a commit publication or merge is in progress — none of it
  * durable across a restart) cap the cursor at their `created_at`, so the
  * next connect re-fetches them, but never by more than
- * {@link BACKFILL_MAX_HOLD_BACK_SECONDS} below both `previous` and the newest
- * event. Returns `undefined` when there is nothing to store.
+ * {@link BACKFILL_MAX_HOLD_BACK_SECONDS} below the newest event. Returns
+ * `undefined` when there is nothing to store.
  */
 export function nextBackfillCursor(options: {
   ingested: NostrEvent[];
@@ -477,10 +477,7 @@ export function nextBackfillCursor(options: {
   if (oldestHeld !== undefined)
     return Math.max(
       Math.min(newest, oldestHeld),
-      Math.min(
-        options.previous ?? Number.POSITIVE_INFINITY,
-        newest - BACKFILL_MAX_HOLD_BACK_SECONDS,
-      ),
+      newest - BACKFILL_MAX_HOLD_BACK_SECONDS,
     );
   return Math.max(options.previous ?? newest, newest);
 }

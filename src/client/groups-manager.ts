@@ -1204,7 +1204,7 @@ export class GroupsManager<
         ];
 
         await this.#recordBackfillProgress(
-          group.idStr,
+          group,
           backfill,
           resume,
           held,
@@ -1212,7 +1212,7 @@ export class GroupsManager<
         );
 
         await this.#advanceBackfillCursors(
-          group.idStr,
+          group,
           backfill,
           drained.trusted,
           held,
@@ -1246,13 +1246,32 @@ export class GroupsManager<
   }
 
   /**
+   * Writes one of a group's backfill records (removes it without `value`),
+   * unless the group is destroyed or disbanded. Their cleanup purges the
+   * group's ingest state, possibly while this write is in flight, so a record
+   * written as the group closes is removed again.
+   */
+  async #writeBackfillRecord(
+    group: MarmotGroup<THistory, TMedia>,
+    key: string,
+    value?: Uint8Array,
+  ): Promise<void> {
+    const closed = () =>
+      group.session.destroyed || group.session.terminalTombstone !== undefined;
+    if (closed()) return;
+    if (value === undefined) return this.#ingestStateStore.removeItem(key);
+    await this.#ingestStateStore.setItem(key, value);
+    if (closed()) await this.#ingestStateStore.removeItem(key);
+  }
+
+  /**
    * Advances the cursor of each relay whose backfill completed, from the
    * events it returned that admission trusted. A relay that hit the page
    * cap, saturated a second, or failed keeps its cursor, so its next connect
    * re-reads the same window. Persistence failures are logged, never thrown.
    */
   async #advanceBackfillCursors(
-    groupIdHex: string,
+    group: MarmotGroup<THistory, TMedia>,
     backfill: PagedBackfillResult,
     trusted: readonly NostrEvent[],
     held: readonly NostrEvent[],
@@ -1273,12 +1292,13 @@ export class GroupsManager<
       });
       if (next === undefined || next === previous) continue;
       try {
-        await this.#ingestStateStore.setItem(
-          backfillCursorKey(groupIdHex, outcome.relay),
+        await this.#writeBackfillRecord(
+          group,
+          backfillCursorKey(group.idStr, outcome.relay),
           encodeBackfillCursor(next),
         );
       } catch (err) {
-        log("connect: failed to persist cursor for %s: %o", groupIdHex, err);
+        log("connect: failed to persist cursor for %s: %o", group.idStr, err);
       }
     }
   }
@@ -1292,18 +1312,18 @@ export class GroupsManager<
    * record unchanged. Persistence failures are logged, never thrown.
    */
   async #recordBackfillProgress(
-    groupIdHex: string,
+    group: MarmotGroup<THistory, TMedia>,
     backfill: PagedBackfillResult,
     recorded: ReadonlyMap<string, BackfillProgress>,
     held: readonly NostrEvent[],
     walkStart: number,
   ): Promise<void> {
     for (const outcome of backfill.relays) {
-      const key = backfillProgressKey(groupIdHex, outcome.relay);
+      const key = backfillProgressKey(group.idStr, outcome.relay);
       try {
         if (outcome.status === "complete") {
           if (recorded.has(outcome.relay))
-            await this.#ingestStateStore.removeItem(key);
+            await this.#writeBackfillRecord(group, key);
         } else if (outcome.status === "capped") {
           const from = outcome.until;
           // End strictly below the oldest held event: its whole second must
@@ -1314,14 +1334,15 @@ export class GroupsManager<
             oldestHeld === undefined ? walkStart : oldestHeld - 1,
           );
           if (from <= to)
-            await this.#ingestStateStore.setItem(
+            await this.#writeBackfillRecord(
+              group,
               key,
               encodeBackfillProgress({ from, to }),
             );
           // Nothing durable to record: drop any older range, which may
           // cover the held event too.
           else if (recorded.has(outcome.relay))
-            await this.#ingestStateStore.removeItem(key);
+            await this.#writeBackfillRecord(group, key);
         }
       } catch (err) {
         log("connect: failed to persist backfill progress: %o", err);

@@ -2107,14 +2107,14 @@ export class MarmotGroupEngine<TEnvelope> {
       return;
     }
     if (!mayApplyRetainedInbound(this.#lifecycle)) {
-      this.#retainedPassInput.push(...envelopes);
+      for (const envelope of envelopes) this.#retainedPassInput.push(envelope);
       return;
     }
     if (
       this.#convergencePass &&
       this.#now() >= this.#convergencePass.deadlineMs
     ) {
-      this.#retainedPassInput.push(...envelopes);
+      for (const envelope of envelopes) this.#retainedPassInput.push(envelope);
       this.#closeConvergencePass();
       this.#scheduleRetainedContinuation();
       return;
