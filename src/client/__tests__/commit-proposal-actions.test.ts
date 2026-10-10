@@ -74,15 +74,27 @@ describe("groups.commit() with array-returning ProposalActions", () => {
     expect(adminGroup.state.groupContext.epoch).toBe(epochBefore + 1n);
   });
 
-  it("renames the group via a name-only Proposals.proposeUpdateMetadata", async () => {
+  it("updates name and admins via a two-component Proposals.proposeUpdateMetadata", async () => {
     const network = new MockNetwork();
-    const { adminClient, adminGroup } = await setupTwoMemberGroup(network);
+    const { adminClient, adminGroup, adminPubkey, memberPubkey } =
+      await setupTwoMemberGroup(network);
     expect(adminGroup.groupData?.name).toBe("Test Group");
+    expect(adminGroup.groupData?.adminPubkeys).toEqual([adminPubkey]);
 
+    // name + adminPubkeys touch two components, so this action resolves to a
+    // multi-element array.
     await adminClient.groups.commit(adminGroup.id, {
-      extraProposals: [Proposals.proposeUpdateMetadata({ name: "Renamed" })],
+      extraProposals: [
+        Proposals.proposeUpdateMetadata({
+          name: "Renamed",
+          adminPubkeys: [adminPubkey, memberPubkey],
+        }),
+      ],
     });
 
     expect(adminGroup.groupData?.name).toBe("Renamed");
+    expect([...(adminGroup.groupData?.adminPubkeys ?? [])].sort()).toEqual(
+      [adminPubkey, memberPubkey].sort(),
+    );
   });
 });
