@@ -23,6 +23,14 @@ export const DEFAULT_BACKFILL_MAX_PAGES = 50;
  */
 export const BACKFILL_FUTURE_SKEW_SECONDS = 5 * 60;
 
+/**
+ * Result cap assumed for a relay that has not shown its own (capped at
+ * `pageSize`). NIP-01 sets no minimum, but relays cap in the hundreds; below
+ * this a one-second page is taken as the whole second, so a small or new
+ * group's history does not read as truncated and stall the cursor.
+ */
+export const BACKFILL_ASSUMED_MIN_RELAY_CAP = 100;
+
 const CURSOR_FORMAT_VERSION = 1;
 
 /**
@@ -153,6 +161,14 @@ export interface PagedBackfillOptions {
   resume?: ReadonlyMap<string, BackfillProgress>;
   /** Stops paging once aborted; unfinished relays then report `failed`. */
   signal?: AbortSignal;
+  /**
+   * Trust gate applied to each event before copies are de-duplicated by id:
+   * an accepted copy always wins over a rejected one with the same id, so an
+   * unverified copy can never replace or suppress a genuine event. A rejected
+   * event is still returned when no accepted copy was fetched, for the caller
+   * to report. Defaults to accepting every event.
+   */
+  accept?: (event: NostrEvent) => boolean;
 }
 
 /** How one relay's paged walk ended. */
@@ -161,15 +177,23 @@ export type RelayBackfillOutcome =
   /** Hit `maxPages`; `until` is where the walk stopped (inclusive). */
   | { relay: string; status: "capped"; until: number }
   /**
-   * One second held at least a full page of events, so some may have been
-   * skipped (timestamp-only paging cannot enumerate them).
+   * A single second filled a page that may have been truncated at the relay's
+   * result cap, so some of its events may have been skipped (timestamp-only
+   * paging cannot enumerate them).
    */
   | { relay: string; status: "saturated" }
+  /**
+   * The request failed, was aborted, or the relay answered outside the
+   * requested `since`/`until` window.
+   */
   | { relay: string; status: "failed" };
 
 /** Result of {@link fetchPagedBackfill}. */
 export interface PagedBackfillResult {
-  /** All distinct events fetched, across every relay. */
+  /**
+   * All distinct events fetched, across every relay. For an id fetched both
+   * as an accepted and a rejected copy (see `accept`), only an accepted copy.
+   */
   events: NostrEvent[];
   /**
    * True when every relay was paged down to `since` (or its oldest event).
@@ -195,7 +219,16 @@ export interface PagedBackfillResult {
  * (duplicates are dropped by id) before stepping past that second. A single
  * second holding a full page of events cannot be paged past with `until`
  * alone (a NIP-01 limitation): the walk steps past it but reports the relay
- * `saturated`, so the caller does not treat the backfill as complete.
+ * `saturated`, so the caller does not treat the backfill as complete. Without
+ * evidence of the relay's cap (a longer response, or a truncated page), a
+ * single-second page of at least {@link BACKFILL_ASSUMED_MIN_RELAY_CAP} events
+ * is assumed to be truncated; a relay capping below that is not detected.
+ *
+ * A response containing an event outside the requested window (a relay that
+ * ignores `since` or `until`) reports the relay `failed`. A response longer
+ * than `pageSize` keeps only its newest `pageSize` events and the walk
+ * continues from there, so each relay retains at most `pageSize * maxPages`
+ * events. The network adapter still receives each response whole.
  */
 export async function fetchPagedBackfill(
   network: NostrNetworkInterface,
@@ -203,8 +236,12 @@ export async function fetchPagedBackfill(
   filter: Filter,
   options: PagedBackfillOptions,
 ): Promise<PagedBackfillResult> {
+  const accept = options.accept ?? (() => true);
   const pageRelay = async (relay: string) => {
+    // Accepted copies, and rejected copies of ids with no accepted copy (yet).
     const collected = new Map<string, NostrEvent>();
+    const rejected = new Map<string, NostrEvent>();
+    const seen = new Set<string>();
     const resume = options.resume?.get(relay);
     let until: number | undefined;
     let steppedPastBoundary = false;
@@ -214,26 +251,43 @@ export async function fetchPagedBackfill(
     let largestSkippedBoundary = 0;
     // Per-request cap this relay has been proven to enforce: a page is only
     // "full" at `pageSize`, or at the length of an earlier page the relay
-    // truncated (the next, narrower request still found new events). The
-    // largest page seen is not proof — a short history is short too.
+    // truncated (the next, narrower request still found new events).
     let confirmedCap = options.pageSize;
+    // Longest response seen, at least the assumed minimum cap. A boundary
+    // page shorter than this was not cut at the relay's cap; one as long may
+    // have been (a relay capped below `pageSize` and a short history look the
+    // same).
+    let longestResponse = Math.min(
+      options.pageSize,
+      BACKFILL_ASSUMED_MIN_RELAY_CAP,
+    );
     let previousLength: number | undefined;
     const saturated = () => {
-      if (largestSkippedBoundary < confirmedCap) return false;
+      if (
+        largestSkippedBoundary === 0 ||
+        largestSkippedBoundary < Math.min(confirmedCap, longestResponse)
+      )
+        return false;
       log("relay %s saturated a second (cap %d)", relay, confirmedCap);
       return true;
     };
+    const failed = () =>
+      ({
+        collected,
+        rejected,
+        outcome: { relay, status: "failed" as const },
+      }) as const;
     const done = () =>
       ({
         collected,
+        rejected,
         outcome: saturated()
           ? { relay, status: "saturated" as const }
           : { relay, status: "complete" as const },
       }) as const;
     for (let page = 0; page < options.maxPages; page++) {
-      if (options.signal?.aborted)
-        return { collected, outcome: { relay, status: "failed" as const } };
-      const events = await network.request([relay], {
+      if (options.signal?.aborted) return failed();
+      let events = await network.request([relay], {
         ...filter,
         limit: options.pageSize,
         ...(options.since !== undefined ? { since: options.since } : {}),
@@ -241,15 +295,43 @@ export async function fetchPagedBackfill(
       });
       if (!events.length) return done();
 
+      // A relay that answers outside the requested window (ignoring `until`
+      // or `since`) gives no basis for deciding what it has left unsent.
+      if (
+        events.some(
+          (event) =>
+            (until !== undefined && event.created_at > until) ||
+            (options.since !== undefined && event.created_at < options.since),
+        )
+      ) {
+        log("relay %s answered outside the requested window", relay);
+        return failed();
+      }
+      // A relay that ignores `limit`: keep the newest page, as a relay
+      // honouring it would have returned. The remainder is re-read below.
+      if (events.length > options.pageSize) {
+        log("relay %s returned more than %d events", relay, options.pageSize);
+        events = [...events]
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, options.pageSize);
+      }
+      longestResponse = Math.max(longestResponse, events.length);
+
       let added = 0;
       let oldest = Number.POSITIVE_INFINITY;
       let newest = Number.NEGATIVE_INFINITY;
       for (const event of events) {
         if (event.created_at < oldest) oldest = event.created_at;
         if (event.created_at > newest) newest = event.created_at;
+        if (!seen.has(event.id)) {
+          seen.add(event.id);
+          added++;
+        }
         if (collected.has(event.id)) continue;
-        collected.set(event.id, event);
-        added++;
+        if (accept(event)) {
+          collected.set(event.id, event);
+          rejected.delete(event.id);
+        } else if (!rejected.has(event.id)) rejected.set(event.id, event);
       }
 
       if (added > 0) {
@@ -260,9 +342,10 @@ export async function fetchPagedBackfill(
         until = oldest;
         steppedPastBoundary = false;
       } else if (steppedPastBoundary) {
-        // Two pages in a row without anything new: the relay has nothing
-        // older (or is ignoring `until`).
-        return done();
+        // Every event older than the stepped-past second is new to this
+        // walk, so a non-empty page without one is a relay misbehaving.
+        log("relay %s repeated events below a stepped-past second", relay);
+        return failed();
       } else {
         // Everything at or after `until` is already collected. A full page
         // from one second means that second may hold more events than one
@@ -294,6 +377,7 @@ export async function fetchPagedBackfill(
     if (saturated()) return done();
     return {
       collected,
+      rejected,
       outcome: { relay, status: "capped" as const, until: Math.max(0, until!) },
     };
   };
@@ -306,6 +390,7 @@ export async function fetchPagedBackfill(
     throw failures[0]!.reason;
 
   const merged = new Map<string, NostrEvent>();
+  const rejected = new Map<string, NostrEvent>();
   const outcomes: RelayBackfillOutcome[] = [];
   settled.forEach((result, i) => {
     if (result.status === "rejected") {
@@ -314,10 +399,14 @@ export async function fetchPagedBackfill(
       return;
     }
     outcomes.push(result.value.outcome);
-    for (const [id, event] of result.value.collected) merged.set(id, event);
+    for (const [id, event] of result.value.collected)
+      if (!merged.has(id)) merged.set(id, event);
+    for (const [id, event] of result.value.rejected)
+      if (!rejected.has(id)) rejected.set(id, event);
   });
+  for (const id of merged.keys()) rejected.delete(id);
   return {
-    events: [...merged.values()],
+    events: [...merged.values(), ...rejected.values()],
     complete: outcomes.every((o) => o.status === "complete"),
     relays: outcomes,
   };

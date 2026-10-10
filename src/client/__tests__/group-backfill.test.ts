@@ -33,6 +33,10 @@ class PagingNetwork extends MockNetwork {
   readonly requests: { relays: string[]; filter: Filter }[] = [];
   readonly relayEvents = new Map<string, NostrEvent[]>();
   readonly relayCaps = new Map<string, number>();
+  /** Relays that answer as if `until` were absent. */
+  readonly ignoresUntil = new Set<string>();
+  /** Relays that answer as if `limit` were absent. */
+  readonly ignoresLimit = new Set<string>();
 
   override async request(
     relays: string[],
@@ -44,15 +48,17 @@ class PagingNetwork extends MockNetwork {
       relays.length === 1 && this.relayEvents.has(relays[0]!)
         ? this.relayEvents.get(relays[0]!)!
         : await super.request(relays, { ...filter, limit: undefined });
+    const relay = relays[0]!;
     const cap = Math.min(
-      filter.limit ?? Infinity,
-      this.relayCaps.get(relays[0]!) ?? Infinity,
+      this.ignoresLimit.has(relay) ? Infinity : (filter.limit ?? Infinity),
+      this.relayCaps.get(relay) ?? Infinity,
     );
+    const until = this.ignoresUntil.has(relay) ? undefined : filter.until;
     return source
       .filter(
         (e) =>
           (filter.since === undefined || e.created_at >= filter.since) &&
-          (filter.until === undefined || e.created_at <= filter.until),
+          (until === undefined || e.created_at <= until),
       )
       .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1))
       .slice(0, cap);
@@ -237,6 +243,35 @@ describe("fetchPagedBackfill", () => {
     expect(result.events).toHaveLength(4);
   });
 
+  it("does not report a one-second history at an unknown relay cap as complete", async () => {
+    const network = new PagingNetwork();
+    // The relay returns at most 120 events per request and its whole history
+    // lies in second 700, so no response ever proves the cap.
+    network.relayEvents.set(
+      "wss://a",
+      Array.from({ length: 150 }, (_, i) => fakeEvent(i + 1, 700)),
+    );
+    network.relayCaps.set("wss://a", 120);
+    // Another relay holds newer events, which would advance the cursor.
+    network.relayEvents.set("wss://b", [
+      fakeEvent(1001, 2001),
+      fakeEvent(1002, 2000),
+    ]);
+
+    const result = await fetchPagedBackfill(
+      network,
+      ["wss://a", "wss://b"],
+      {},
+      { pageSize: 500, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([
+      { relay: "wss://a", status: "saturated" },
+      { relay: "wss://b", status: "complete" },
+    ]);
+  });
+
   it("detects saturation at a relay cap confirmed below `pageSize`", async () => {
     const network = new PagingNetwork();
     network.relayEvents.set(RELAY, [
@@ -306,6 +341,124 @@ describe("fetchPagedBackfill", () => {
     expect(result.relays).toEqual([
       { relay: RELAY, status: "capped", until: 1000 },
     ]);
+  });
+
+  it("keeps the genuine copy whichever relay returns a forged one", async () => {
+    const genuine = fakeEvent(1, 1000);
+    const newer = fakeEvent(2, 2000);
+    const forged = { ...genuine, content: "forged" };
+    const accept = (event: NostrEvent) => event !== forged;
+
+    for (const relays of [
+      ["wss://a", "wss://b"],
+      ["wss://b", "wss://a"],
+    ]) {
+      const network = new PagingNetwork();
+      network.relayEvents.set("wss://a", [genuine, newer]);
+      network.relayEvents.set("wss://b", [forged, newer]);
+
+      const result = await fetchPagedBackfill(
+        network,
+        relays,
+        {},
+        {
+          pageSize: 10,
+          maxPages: 20,
+          accept,
+        },
+      );
+
+      expect(result.complete).toBe(true);
+      expect(result.events).toHaveLength(2);
+      expect(result.events).toContain(genuine);
+      expect(result.events).not.toContain(forged);
+    }
+  });
+
+  it("keeps the genuine copy when one relay returns a forged copy first", async () => {
+    const genuine = fakeEvent(1, 1000);
+    // Same id, re-dated so the relay returns it ahead of the genuine event.
+    const forged = { ...genuine, created_at: 1500 };
+    const network = new PagingNetwork();
+    network.relayEvents.set(RELAY, [genuine, forged, fakeEvent(2, 2000)]);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      {
+        pageSize: 10,
+        maxPages: 20,
+        accept: (event) => event !== forged,
+      },
+    );
+
+    expect(result.events).toHaveLength(2);
+    expect(result.events).toContain(genuine);
+    expect(result.events).not.toContain(forged);
+  });
+
+  it("fails a relay that ignores `until`", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set(RELAY, [
+      fakeEvent(1, 2000),
+      fakeEvent(2, 1900),
+      fakeEvent(3, 1000),
+    ]);
+    network.ignoresUntil.add(RELAY);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 2, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([{ relay: RELAY, status: "failed" }]);
+  });
+
+  it("keeps at most `pageSize` events of a response that ignores `limit`", async () => {
+    const network = new PagingNetwork();
+    network.relayEvents.set(
+      RELAY,
+      Array.from({ length: 10_000 }, (_, i) => fakeEvent(i + 1, 10_000 + i)),
+    );
+    network.ignoresLimit.add(RELAY);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 2, maxPages: 1 },
+    );
+
+    expect(result.events.map((e) => e.created_at)).toEqual([19_999, 19_998]);
+    expect(result.complete).toBe(false);
+    expect(result.relays).toEqual([
+      { relay: RELAY, status: "capped", until: 19_998 },
+    ]);
+  });
+
+  it("still pages a relay that ignores `limit` to completion", async () => {
+    const network = new PagingNetwork();
+    const events = Array.from({ length: 7 }, (_, i) =>
+      fakeEvent(i + 1, 1000 + i),
+    );
+    network.relayEvents.set(RELAY, events);
+    network.ignoresLimit.add(RELAY);
+
+    const result = await fetchPagedBackfill(
+      network,
+      [RELAY],
+      {},
+      { pageSize: 2, maxPages: 20 },
+    );
+
+    expect(result.complete).toBe(true);
+    expect(new Set(result.events.map((e) => e.id))).toEqual(
+      new Set(events.map((e) => e.id)),
+    );
   });
 
   it("reports an incomplete backfill when the page cap is hit", async () => {
@@ -487,6 +640,30 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
         await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
       ),
     ).toBe(newest);
+  });
+
+  it("admits the genuine event when its relay returns a forged copy first", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const forgeries = new WeakSet<NostrEvent>();
+    const { manager, group, groupEvents } = await groupWithHistory(
+      network,
+      3,
+      newest,
+      (e) => !forgeries.has(e),
+    );
+    // A same-id copy that fails verification, dated so the relay returns it
+    // before the genuine event.
+    const forged = { ...groupEvents[0]!, created_at: newest - 1 };
+    forgeries.add(forged);
+    network.relayEvents.set(RELAY, [...groupEvents, forged]);
+    const ingestSpy = vi.spyOn(group, "ingest");
+
+    (await manager.connect(group.id)).unsubscribe();
+
+    const backfilled = ingestSpy.mock.calls[0]![0] as NostrEvent[];
+    expect(backfilled).toContain(groupEvents[0]);
+    expect(backfilled).not.toContain(forged);
   });
 
   it("stops paging when the connection is aborted mid-backfill", async () => {

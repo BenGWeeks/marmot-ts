@@ -1141,6 +1141,11 @@ export class GroupsManager<
         maxPages,
         resume,
         signal: paging.signal,
+        // The admission trust gates, applied before copies are collapsed by
+        // id so a forged copy cannot displace the genuine event.
+        accept: (event) =>
+          safeVerifyEvent(this.#verifyEvent, event) &&
+          getSingletonTagValue(event, "h") === h,
       });
       const drained = await admit(backfill.events);
       // Events the group holds only in memory (undecryptable-so-far pool and
