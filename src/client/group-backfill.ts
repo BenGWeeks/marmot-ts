@@ -418,9 +418,11 @@ export async function fetchPagedBackfill(
  * The cursor is the newest plausibly-dated ingested event; events dated more
  * than {@link BACKFILL_FUTURE_SKEW_SECONDS} ahead of `nowSeconds` are ignored.
  * Events the group is still holding only in memory (its ingestion pool and
- * capacity-refused input, see `MarmotGroup.pendingEvents()` — not durable
- * across a restart) cap the cursor at their `created_at`, so the next connect
- * re-fetches them. Returns `undefined` when there is nothing to store.
+ * capacity-refused input, see `MarmotGroup.pendingEvents()`, and input
+ * retained while a commit publication or merge is in progress — none of it
+ * durable across a restart) cap the cursor at their `created_at`, so the
+ * next connect re-fetches them. Returns `undefined` when there is nothing to
+ * store.
  */
 export function nextBackfillCursor(options: {
   ingested: NostrEvent[];

@@ -121,6 +121,28 @@ async function groupWithHistory(
   return { manager, group, groupEvents, ingestStateStore };
 }
 
+/**
+ * Another group's application message, re-tagged into the group of
+ * `template` and dated `createdAt`: this group cannot decrypt it. It is
+ * removed from the network's stored events, so only the caller delivers it.
+ */
+async function foreignEvent(
+  network: PagingNetwork,
+  template: NostrEvent,
+  createdAt: number,
+): Promise<NostrEvent> {
+  const other = makeManager(network);
+  const otherGroup = await other.create("Other", { relays: [RELAY] });
+  await other.send(otherGroup.id, {
+    kind: "applicationMessage",
+    payload: new TextEncoder().encode("foreign"),
+  });
+  const foreign = network.events.pop()!;
+  foreign.tags = template.tags.map((tag) => [...tag]);
+  foreign.created_at = createdAt;
+  return foreign;
+}
+
 describe("fetchPagedBackfill", () => {
   it("stops paging once the signal is aborted", async () => {
     const network = new PagingNetwork();
@@ -809,5 +831,101 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     expect(
       await ingestStateStore.getItem(backfillProgressKey(group.idStr, RELAY)),
     ).toBeNull();
+  });
+
+  it("does not advance the cursor past input retained during a commit publication", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 3, newest);
+    const older = await foreignEvent(network, groupEvents[0]!, newest - 30);
+    network.events.push(older);
+    // Hold this member's own commit publication in flight: the engine then
+    // retains inbound input, in memory only, until the publication settles.
+    let releasePublish!: () => void;
+    const publishing = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    const publish = network.publish.bind(network);
+    network.publish = async (relays, event) => {
+      await publishing;
+      return publish(relays, event);
+    };
+    const update = group.selfUpdate();
+    await vi.waitFor(() => expect(group.lifecycle).toBe("PendingPublish"));
+
+    (await manager.connect(group.id)).unsubscribe();
+
+    expect(group.session.retainedEvents().map((e) => e.id)).toContain(older.id);
+    // A restart now would lose the retained event, so the next connect must
+    // re-fetch from it.
+    expect(
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      ),
+    ).toBe(newest - 30);
+
+    releasePublish();
+    await update;
+  });
+
+  it("persists the cursor before a live batch admitted meanwhile is ingested", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, groupEvents, ingestStateStore } =
+      await groupWithHistory(network, 3, newest);
+    // An undecryptable event to deliver live later, kept off the relay.
+    const foreign = await foreignEvent(network, groupEvents[0]!, newest - 30);
+
+    // A live connection whose capped backfill records progress, no cursor.
+    const live = await manager.connect(group.id, {
+      backfillPageSize: 1,
+      backfillMaxPages: 1,
+    });
+    expect(
+      await ingestStateStore.getItem(backfillProgressKey(group.idStr, RELAY)),
+    ).not.toBeNull();
+
+    // The reconnect completes, so it first drops that progress record (held
+    // here), then writes the cursor.
+    let reachedRemove!: () => void;
+    const removing = new Promise<void>((resolve) => {
+      reachedRemove = resolve;
+    });
+    let releaseRemove!: () => void;
+    const removeGate = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const removeItem = ingestStateStore.removeItem.bind(ingestStateStore);
+    ingestStateStore.removeItem = async (key) => {
+      reachedRemove();
+      await removeGate;
+      return removeItem(key);
+    };
+    const ingestSpy = vi.spyOn(group, "ingest");
+    const liveIngested = () =>
+      ingestSpy.mock.calls.some((call) =>
+        (call[0] as NostrEvent[]).some((e) => e.id === foreign.id),
+      );
+    let liveIngestedAtCursorWrite: boolean | undefined;
+    const setItem = ingestStateStore.setItem.bind(ingestStateStore);
+    ingestStateStore.setItem = async (key, value) => {
+      if (key === backfillCursorKey(group.idStr))
+        liveIngestedAtCursorWrite = liveIngested();
+      return setItem(key, value);
+    };
+
+    const reconnect = manager.connect(group.id);
+    await removing;
+    // A live batch arrives while the reconnect is persisting.
+    await network.publish([RELAY], foreign);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(liveIngested()).toBe(false);
+    releaseRemove();
+    (await reconnect).unsubscribe();
+    await vi.waitFor(() => expect(liveIngested()).toBe(true));
+    live.unsubscribe();
+
+    expect(liveIngestedAtCursorWrite).toBe(false);
   });
 });

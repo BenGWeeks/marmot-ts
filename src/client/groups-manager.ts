@@ -1071,15 +1071,39 @@ export class GroupsManager<
       for await (const result of group.ingest(trusted)) void result;
       return outcome;
     };
-    const admit = (events: NostrEvent[]): Promise<DrainOutcome> => {
+    /**
+     * Queues `events` behind every earlier batch for this group. `settle`
+     * runs in the same queued operation, after the drain, so no later batch
+     * is ingested while it inspects or persists ingest-dependent state.
+     */
+    const admit = (
+      events: NostrEvent[],
+      settle?: (outcome: DrainOutcome) => Promise<void>,
+    ): Promise<DrainOutcome> => {
       if (cancelled) return Promise.resolve({ trusted: [], failed: true });
       record.pending++;
       const work = record.tail
-        .then(() => drain(events))
-        .catch((err): DrainOutcome => {
-          log("connect: ingest failed for group %s: %o", group.idStr, err);
-          record.ingestFailed = true;
-          return { trusted: [], failed: true };
+        .then(async () => {
+          let outcome: DrainOutcome;
+          try {
+            outcome = await drain(events);
+          } catch (err) {
+            log("connect: ingest failed for group %s: %o", group.idStr, err);
+            record.ingestFailed = true;
+            outcome = { trusted: [], failed: true };
+          }
+          if (settle) {
+            try {
+              await settle(outcome);
+            } catch (err) {
+              log(
+                "connect: backfill settle failed for %s: %o",
+                group.idStr,
+                err,
+              );
+            }
+          }
+          return outcome;
         })
         .finally(() => {
           record.pending--;
@@ -1147,14 +1171,22 @@ export class GroupsManager<
           safeVerifyEvent(this.#verifyEvent, event) &&
           getSingletonTagValue(event, "h") === h,
       });
-      const drained = await admit(backfill.events);
-      // Events the group holds only in memory (undecryptable-so-far pool and
-      // capacity-refused input) are lost on restart, so neither the cursor nor
-      // recorded progress may pass them. The pool is read directly because
-      // ingest pools undecryptable events without yielding a result for them.
-      const held = drained.failed ? [] : group.pendingEvents();
+      await admit(backfill.events, async (drained) => {
+        // Decided inside the admission queue: no other batch for this group
+        // can be ingested (and pool, retain, or fail) between reading the
+        // state below and persisting the cursor and progress.
+        if (drained.failed || cancelled || group.session.terminalTombstone)
+          return;
+        // Events the group holds only in memory are lost on restart, so
+        // neither the cursor nor recorded progress may pass them: the
+        // undecryptable-so-far pool and capacity-refused input (pooled
+        // without yielding a result), and input retained while a commit
+        // publication or merge is in progress.
+        const held = [
+          ...group.pendingEvents(),
+          ...group.session.retainedEvents(),
+        ];
 
-      if (!drained.failed)
         await this.#recordBackfillProgress(
           group.idStr,
           backfill,
@@ -1163,30 +1195,26 @@ export class GroupsManager<
           walkStart,
         );
 
-      // Advance the cursor only once the whole backfill window was fetched AND
-      // ingested; otherwise the next connect re-reads from the old cursor.
-      if (backfill.complete && !drained.failed) {
+        // Advance the cursor only once the whole backfill window was fetched
+        // AND ingested; otherwise the next connect re-reads from the old
+        // cursor.
+        if (!backfill.complete) return;
         const next = nextBackfillCursor({
           ingested: drained.trusted,
           held,
           previous: cursor,
           nowSeconds: nowSeconds(),
         });
-        if (next !== undefined && next !== cursor) {
-          try {
-            await this.#ingestStateStore.setItem(
-              backfillCursorKey(group.idStr),
-              encodeBackfillCursor(next),
-            );
-          } catch (err) {
-            log(
-              "connect: failed to persist cursor for %s: %o",
-              group.idStr,
-              err,
-            );
-          }
+        if (next === undefined || next === cursor) return;
+        try {
+          await this.#ingestStateStore.setItem(
+            backfillCursorKey(group.idStr),
+            encodeBackfillCursor(next),
+          );
+        } catch (err) {
+          log("connect: failed to persist cursor for %s: %o", group.idStr, err);
         }
-      }
+      });
 
       // Backfill may itself have selected terminal state. Never seed a live route
       // after the durable tombstone has won.
