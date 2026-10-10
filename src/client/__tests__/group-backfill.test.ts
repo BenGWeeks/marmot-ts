@@ -8,6 +8,7 @@ import type { SerializedClientState } from "../../core/client-state.js";
 import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
 import {
   BACKFILL_FUTURE_SKEW_SECONDS,
+  BACKFILL_MAX_HOLD_BACK_SECONDS,
   backfillCursorKey,
   backfillProgressKey,
   decodeBackfillCursor,
@@ -21,6 +22,7 @@ import type { NostrNetworkInterface } from "../nostr-interface.js";
 import { fakeVerifyEvent, type VerifyEventMethod } from "../verify.js";
 
 const RELAY = "wss://relay.test";
+const RELAY_B = "wss://relay-b.test";
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 /**
@@ -37,6 +39,15 @@ class PagingNetwork extends MockNetwork {
   readonly ignoresUntil = new Set<string>();
   /** Relays that answer as if `limit` were absent. */
   readonly ignoresLimit = new Set<string>();
+  /** Relays whose requests reject, as an unreachable relay's would. */
+  readonly unreachable = new Set<string>();
+  /** Filters of every live subscription opened. */
+  readonly subscriptions: Filter[] = [];
+
+  override subscription(relays: string[], filters: Filter | Filter[]) {
+    this.subscriptions.push(...(Array.isArray(filters) ? filters : [filters]));
+    return super.subscription(relays, filters);
+  }
 
   override async request(
     relays: string[],
@@ -44,6 +55,7 @@ class PagingNetwork extends MockNetwork {
   ): Promise<NostrEvent[]> {
     const filter = (Array.isArray(filters) ? filters[0] : filters)!;
     this.requests.push({ relays, filter });
+    if (this.unreachable.has(relays[0]!)) throw new Error("unreachable");
     const source =
       relays.length === 1 && this.relayEvents.has(relays[0]!)
         ? this.relayEvents.get(relays[0]!)!
@@ -77,15 +89,21 @@ function fakeEvent(id: number, createdAt: number): NostrEvent {
   };
 }
 
+function newStores() {
+  return {
+    store: new InMemoryKeyValueStore<SerializedClientState>(),
+    ingestStateStore: new InMemoryKeyValueStore<Uint8Array>(),
+    lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+  };
+}
+
 function makeManager(
   network: NostrNetworkInterface,
-  ingestStateStore = new InMemoryKeyValueStore<Uint8Array>(),
+  stores = newStores(),
   verifyEvent: VerifyEventMethod = fakeVerifyEvent,
 ) {
   return new GroupsManager({
-    store: new InMemoryKeyValueStore<SerializedClientState>(),
-    ingestStateStore,
-    lifecycleStore: new InMemoryKeyValueStore<Uint8Array>(),
+    ...stores,
     ingestPersistence: { kind: "durable" },
     signer: testAccount(0).signer,
     network,
@@ -103,10 +121,12 @@ async function groupWithHistory(
   count: number,
   newest: number,
   verifyEvent?: VerifyEventMethod,
+  relays = [RELAY],
 ) {
-  const ingestStateStore = new InMemoryKeyValueStore<Uint8Array>();
-  const manager = makeManager(network, ingestStateStore, verifyEvent);
-  const group = await manager.create("Backfill Group", { relays: [RELAY] });
+  const stores = newStores();
+  const { ingestStateStore } = stores;
+  const manager = makeManager(network, stores, verifyEvent);
+  const group = await manager.create("Backfill Group", { relays });
   for (let i = 0; i < count; i++) {
     await manager.send(group.id, {
       kind: "applicationMessage",
@@ -118,7 +138,7 @@ async function groupWithHistory(
   groupEvents.forEach((event, i) => {
     event.created_at = newest - (count - 1 - i);
   });
-  return { manager, group, groupEvents, ingestStateStore };
+  return { manager, group, groupEvents, ingestStateStore, stores };
 }
 
 /**
@@ -544,6 +564,28 @@ describe("nextBackfillCursor", () => {
     expect(next).toBe(now - 50);
   });
 
+  it("does not let a held event dated far in the past pin the cursor", () => {
+    const now = 1_800_000_000;
+    const ancient = fakeEvent(2, 0);
+    expect(
+      nextBackfillCursor({
+        ingested: [fakeEvent(1, now - 10)],
+        held: [ancient],
+        previous: undefined,
+        nowSeconds: now,
+      }),
+    ).toBe(now - 10 - BACKFILL_MAX_HOLD_BACK_SECONDS);
+    // An older previous cursor still bounds how far it can be pulled back.
+    expect(
+      nextBackfillCursor({
+        ingested: [fakeEvent(1, now - 10)],
+        held: [fakeEvent(3, now - 20 * 86_400), ancient],
+        previous: now - 30 * 86_400,
+        nowSeconds: now,
+      }),
+    ).toBe(now - 30 * 86_400);
+  });
+
   it("never moves backwards without a held event", () => {
     const next = nextBackfillCursor({
       ingested: [fakeEvent(1, now - 100)],
@@ -552,6 +594,18 @@ describe("nextBackfillCursor", () => {
       nowSeconds: now,
     });
     expect(next).toBe(now - 10);
+  });
+
+  it("keys a relay's records by its normalised URL", () => {
+    expect(backfillCursorKey("aa", "wss://relay.test")).toBe(
+      backfillCursorKey("aa", "wss://relay.test/"),
+    );
+    expect(backfillProgressKey("aa", "wss://Relay.test")).toBe(
+      backfillProgressKey("aa", "wss://relay.test/"),
+    );
+    expect(backfillCursorKey("aa", RELAY)).not.toBe(
+      backfillCursorKey("aa", RELAY_B),
+    );
   });
 
   it("round-trips the stored encoding and rejects malformed bytes", () => {
@@ -602,7 +656,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     (await manager.connect(group.id, { backfillPageSize: 3 })).unsubscribe();
     expect(
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       ),
     ).toBe(newest);
 
@@ -636,7 +690,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
 
     expect(
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       ),
     ).toBe(newest);
   });
@@ -659,7 +713,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
 
     expect(
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       ),
     ).toBe(newest);
   });
@@ -711,7 +765,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
 
     expect(network.requests).toHaveLength(1);
     expect(
-      await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
     ).toBeNull();
   });
 
@@ -731,7 +785,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     ).unsubscribe();
 
     expect(
-      await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+      await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
     ).toBeNull();
   });
 
@@ -757,7 +811,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     expect(group.pendingEvents().map((e) => e.id)).toContain(foreign.id);
     expect(
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       ),
     ).toBe(newest - 30);
   });
@@ -810,7 +864,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     };
     const cursor = async () =>
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       );
 
     let connects = 0;
@@ -833,10 +887,10 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     ).toBeNull();
   });
 
-  it("does not advance the cursor past input retained during a commit publication", async () => {
+  it("re-fetches input retained during a commit publication after a restart", async () => {
     const network = new PagingNetwork([RELAY]);
     const newest = nowSeconds() - 60;
-    const { manager, group, groupEvents, ingestStateStore } =
+    const { manager, group, groupEvents, ingestStateStore, stores } =
       await groupWithHistory(network, 3, newest);
     const older = await foreignEvent(network, groupEvents[0]!, newest - 30);
     network.events.push(older);
@@ -857,13 +911,20 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     (await manager.connect(group.id)).unsubscribe();
 
     expect(group.session.retainedEvents().map((e) => e.id)).toContain(older.id);
-    // A restart now would lose the retained event, so the next connect must
-    // re-fetch from it.
     expect(
       decodeBackfillCursor(
-        await ingestStateStore.getItem(backfillCursorKey(group.idStr)),
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
       ),
     ).toBe(newest - 30);
+
+    // Restart before the publication settles: a new manager over the same
+    // stores re-fetches the retained event.
+    const restarted = makeManager(network, stores);
+    const reloaded = await restarted.get(group.id);
+    const ingestSpy = vi.spyOn(reloaded, "ingest");
+    (await restarted.connect(group.id)).unsubscribe();
+    const backfilled = ingestSpy.mock.calls[0]![0] as NostrEvent[];
+    expect(backfilled.map((e) => e.id)).toContain(older.id);
 
     releasePublish();
     await update;
@@ -910,7 +971,7 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     let liveIngestedAtCursorWrite: boolean | undefined;
     const setItem = ingestStateStore.setItem.bind(ingestStateStore);
     ingestStateStore.setItem = async (key, value) => {
-      if (key === backfillCursorKey(group.idStr))
+      if (key === backfillCursorKey(group.idStr, RELAY))
         liveIngestedAtCursorWrite = liveIngested();
       return setItem(key, value);
     };
@@ -927,5 +988,128 @@ describe("GroupsManager.connect bounded, paged backfill (#106)", () => {
     live.unsubscribe();
 
     expect(liveIngestedAtCursorWrite).toBe(false);
+  });
+
+  it("advances a healthy relay's cursor while another relay is unreachable", async () => {
+    const network = new PagingNetwork([RELAY, RELAY_B]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, ingestStateStore } = await groupWithHistory(
+      network,
+      3,
+      newest,
+      undefined,
+      [RELAY, RELAY_B],
+    );
+    const cursor = async (relay: string) =>
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, relay)),
+      );
+    network.unreachable.add(RELAY_B);
+
+    (await manager.connect(group.id)).unsubscribe();
+
+    expect(await cursor(RELAY)).toBe(newest);
+    expect(await cursor(RELAY_B)).toBeUndefined();
+
+    // The healthy relay is now fetched from its cursor; the other relay is
+    // paged in full until one of its backfills completes.
+    network.unreachable.clear();
+    network.requests.length = 0;
+    (
+      await manager.connect(group.id, { backfillSlackSeconds: 120 })
+    ).unsubscribe();
+
+    const sinceOf = (relay: string) =>
+      network.requests
+        .filter((r) => r.relays[0] === relay)
+        .map((r) => r.filter.since);
+    expect(sinceOf(RELAY).every((since) => since === newest - 120)).toBe(true);
+    expect(sinceOf(RELAY_B).every((since) => since === undefined)).toBe(true);
+    expect(await cursor(RELAY_B)).toBe(newest);
+  });
+
+  it("does not advance a relay's cursor when it ignores `until`", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const { manager, group, ingestStateStore } = await groupWithHistory(
+      network,
+      5,
+      nowSeconds() - 60,
+    );
+    network.ignoresUntil.add(RELAY);
+
+    (await manager.connect(group.id, { backfillPageSize: 2 })).unsubscribe();
+
+    expect(
+      await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
+    ).toBeNull();
+  });
+
+  it("keeps the cursor while an earlier batch for the group failed to ingest", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const newest = nowSeconds() - 60;
+    const { manager, group, ingestStateStore } = await groupWithHistory(
+      network,
+      3,
+      newest,
+    );
+    const cursor = async () =>
+      decodeBackfillCursor(
+        await ingestStateStore.getItem(backfillCursorKey(group.idStr, RELAY)),
+      );
+    vi.spyOn(group, "ingest").mockImplementationOnce(async function* () {
+      throw new Error("ingest failed");
+    });
+
+    const open = await manager.connect(group.id);
+    expect(await cursor()).toBeUndefined();
+    // The failed batch's ids are already admitted, so a reconnect sees them
+    // as known; the failure stays recorded while the group is connected.
+    (await manager.connect(group.id)).unsubscribe();
+    expect(await cursor()).toBeUndefined();
+
+    // Once every connection and queued batch for the group is gone, a fresh
+    // backfill re-admits and ingests the history.
+    open.unsubscribe();
+    await vi.waitFor(async () => {
+      (await manager.connect(group.id)).unsubscribe();
+      expect(await cursor()).toBe(newest);
+    });
+  });
+
+  it("starts the live subscription at the backfill window", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const { manager, group } = await groupWithHistory(
+      network,
+      2,
+      nowSeconds() - 60,
+    );
+    const before = nowSeconds();
+
+    (
+      await manager.connect(group.id, { backfillSlackSeconds: 120 })
+    ).unsubscribe();
+
+    const since = network.subscriptions.at(-1)!.since!;
+    expect(since).toBeGreaterThanOrEqual(before - 120);
+    expect(since).toBeLessThanOrEqual(nowSeconds() - 120);
+  });
+
+  it("applies backfill options under connectAll and validates them up front", async () => {
+    const network = new PagingNetwork([RELAY]);
+    const { manager } = await groupWithHistory(network, 3, nowSeconds() - 60);
+    network.requests.length = 0;
+
+    expect(() => manager.connectAll({ backfillPageSize: 0 })).toThrow(
+      "backfillPageSize",
+    );
+    await expect(
+      manager.connect(new Uint8Array(32), { backfillSlackSeconds: -1 }),
+    ).rejects.toThrow("backfillSlackSeconds");
+
+    const all = manager.connectAll({ backfillPageSize: 2 });
+    await vi.waitFor(() => expect(network.subscriptions).toHaveLength(1));
+    all.unsubscribe();
+    expect(network.requests.length).toBeGreaterThan(1);
+    expect(network.requests.every((r) => r.filter.limit === 2)).toBe(true);
   });
 });

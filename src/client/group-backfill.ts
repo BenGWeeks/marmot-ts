@@ -6,6 +6,7 @@ import type { Filter } from "applesauce-core/helpers/filter";
 
 import { logger } from "../utils/debug.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
+import { normalizeRelayUrl } from "../utils/relay-url.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
 
 const log = logger.extend("GroupBackfill");
@@ -22,6 +23,13 @@ export const DEFAULT_BACKFILL_MAX_PAGES = 50;
  * past events that have not been published yet.
  */
 export const BACKFILL_FUTURE_SKEW_SECONDS = 5 * 60;
+/**
+ * Furthest an event held in memory can pull a cursor back (seconds): below
+ * both the previous cursor and this long before the newest fetched event, a
+ * held event no longer holds the cursor. An undecryptable event dated far in
+ * the past must not force a full backfill on every connect.
+ */
+export const BACKFILL_MAX_HOLD_BACK_SECONDS = 7 * 24 * 60 * 60;
 
 /**
  * Result cap assumed for a relay that has not shown its own (capped at
@@ -34,12 +42,27 @@ export const BACKFILL_ASSUMED_MIN_RELAY_CAP = 100;
 const CURSOR_FORMAT_VERSION = 1;
 
 /**
- * Key of a group's backfill cursor in the ingest-state store. It lives under
- * the `${groupIdHex}/` prefix so group-scoped ingest-state cleanup (disband)
- * removes it with the rest of the group's ingest state.
+ * Key segment for a relay: its normalised URL (so `wss://r` and `wss://r/`
+ * share records), hashed so arbitrary URLs make well-formed keys.
  */
-export function backfillCursorKey(groupIdHex: string): string {
-  return `${groupIdHex}/ingest/backfill-cursor/v1`;
+function relayKey(relay: string): string {
+  let url = relay;
+  try {
+    url = normalizeRelayUrl(relay);
+  } catch {
+    // Not a parseable URL: key it as given.
+  }
+  return bytesToHex(sha256(utf8ToBytes(url)));
+}
+
+/**
+ * Key of a relay's backfill cursor for a group in the ingest-state store
+ * (one record per group relay). It lives under the `${groupIdHex}/` prefix so
+ * group-scoped ingest-state cleanup (disband) removes it with the rest of the
+ * group's ingest state.
+ */
+export function backfillCursorKey(groupIdHex: string, relay: string): string {
+  return `${groupIdHex}/ingest/backfill-cursor/v1/${relayKey(relay)}`;
 }
 
 /** Encodes a cursor (unix seconds) as a version byte + big-endian uint32. */
@@ -64,17 +87,18 @@ export function decodeBackfillCursor(
 }
 
 /**
- * Reads a group's backfill cursor. A malformed cursor, or one dated
- * implausibly far in the future, is ignored so the caller falls back to a full
- * (paged) backfill rather than skipping history.
+ * Reads a relay's backfill cursor for a group. A malformed cursor, or one
+ * dated implausibly far in the future, is ignored so the caller falls back to
+ * a full (paged) backfill of that relay rather than skipping history.
  */
 export async function readBackfillCursor(
   store: GenericKeyValueStore<Uint8Array>,
   groupIdHex: string,
+  relay: string,
   nowSeconds: number,
 ): Promise<number | undefined> {
   const cursor = decodeBackfillCursor(
-    await store.getItem(backfillCursorKey(groupIdHex)),
+    await store.getItem(backfillCursorKey(groupIdHex, relay)),
   );
   if (cursor === undefined) return undefined;
   if (cursor > nowSeconds + BACKFILL_FUTURE_SKEW_SECONDS) {
@@ -87,10 +111,10 @@ export async function readBackfillCursor(
 /**
  * Key of a relay's resumable paging progress for a group (bounded: one record
  * per group relay). Lives under the group's ingest-state prefix, like the
- * cursor. The relay URL is hashed so arbitrary URLs make well-formed keys.
+ * cursor.
  */
 export function backfillProgressKey(groupIdHex: string, relay: string): string {
-  return `${groupIdHex}/ingest/backfill-progress/v1/${bytesToHex(sha256(utf8ToBytes(relay)))}`;
+  return `${groupIdHex}/ingest/backfill-progress/v1/${relayKey(relay)}`;
 }
 
 /**
@@ -134,7 +158,7 @@ export async function readBackfillProgress(
   store: GenericKeyValueStore<Uint8Array>,
   groupIdHex: string,
   relay: string,
-  nowSeconds = Math.floor(Date.now() / 1000),
+  nowSeconds: number,
 ): Promise<BackfillProgress | undefined> {
   const progress = decodeBackfillProgress(
     await store.getItem(backfillProgressKey(groupIdHex, relay)),
@@ -146,8 +170,11 @@ export async function readBackfillProgress(
 
 /** Options for {@link fetchPagedBackfill}. */
 export interface PagedBackfillOptions {
-  /** Lower bound passed as `since`; omit to fetch the full history. */
-  since?: number;
+  /**
+   * Per-relay lower bound passed as `since`; a relay without one is paged
+   * through its full history.
+   */
+  since?: ReadonlyMap<string, number>;
   /** `limit` of each page. */
   pageSize: number;
   /** Maximum pages fetched from each relay. */
@@ -204,6 +231,8 @@ export interface PagedBackfillResult {
   complete: boolean;
   /** Per-relay outcome, in `relays` order. */
   relays: RelayBackfillOutcome[];
+  /** The accepted events each relay returned (see `accept`). */
+  relayEvents: ReadonlyMap<string, readonly NostrEvent[]>;
 }
 
 /**
@@ -243,6 +272,7 @@ export async function fetchPagedBackfill(
     const rejected = new Map<string, NostrEvent>();
     const seen = new Set<string>();
     const resume = options.resume?.get(relay);
+    const since = options.since?.get(relay);
     let until: number | undefined;
     let steppedPastBoundary = false;
     // Largest single-second boundary page the walk stepped past. Judged
@@ -290,7 +320,7 @@ export async function fetchPagedBackfill(
       let events = await network.request([relay], {
         ...filter,
         limit: options.pageSize,
-        ...(options.since !== undefined ? { since: options.since } : {}),
+        ...(since !== undefined ? { since } : {}),
         ...(until !== undefined ? { until } : {}),
       });
       if (!events.length) return done();
@@ -301,7 +331,7 @@ export async function fetchPagedBackfill(
         events.some(
           (event) =>
             (until !== undefined && event.created_at > until) ||
-            (options.since !== undefined && event.created_at < options.since),
+            (since !== undefined && event.created_at < since),
         )
       ) {
         log("relay %s answered outside the requested window", relay);
@@ -369,7 +399,7 @@ export async function fetchPagedBackfill(
         // The next request is not narrower than this one: no cap evidence.
         previousLength = undefined;
       }
-      if (options.since !== undefined && until < options.since) return done();
+      if (since !== undefined && until < since) return done();
     }
     log("relay %s hit the %d-page backfill cap", relay, options.maxPages);
     // A saturated walk is never recorded as resumable progress: resuming
@@ -392,6 +422,7 @@ export async function fetchPagedBackfill(
   const merged = new Map<string, NostrEvent>();
   const rejected = new Map<string, NostrEvent>();
   const outcomes: RelayBackfillOutcome[] = [];
+  const relayEvents = new Map<string, readonly NostrEvent[]>();
   settled.forEach((result, i) => {
     if (result.status === "rejected") {
       log("backfill request failed: %o", result.reason);
@@ -399,6 +430,7 @@ export async function fetchPagedBackfill(
       return;
     }
     outcomes.push(result.value.outcome);
+    relayEvents.set(relays[i]!, [...result.value.collected.values()]);
     for (const [id, event] of result.value.collected)
       if (!merged.has(id)) merged.set(id, event);
     for (const [id, event] of result.value.rejected)
@@ -409,11 +441,13 @@ export async function fetchPagedBackfill(
     events: [...merged.values(), ...rejected.values()],
     complete: outcomes.every((o) => o.status === "complete"),
     relays: outcomes,
+    relayEvents,
   };
 }
 
 /**
- * Computes the cursor to persist after a complete backfill has been ingested.
+ * Computes a relay's cursor to persist after its complete backfill has been
+ * ingested.
  *
  * The cursor is the newest plausibly-dated ingested event; events dated more
  * than {@link BACKFILL_FUTURE_SKEW_SECONDS} ahead of `nowSeconds` are ignored.
@@ -421,8 +455,9 @@ export async function fetchPagedBackfill(
  * capacity-refused input, see `MarmotGroup.pendingEvents()`, and input
  * retained while a commit publication or merge is in progress — none of it
  * durable across a restart) cap the cursor at their `created_at`, so the
- * next connect re-fetches them. Returns `undefined` when there is nothing to
- * store.
+ * next connect re-fetches them, but never by more than
+ * {@link BACKFILL_MAX_HOLD_BACK_SECONDS} below both `previous` and the newest
+ * event. Returns `undefined` when there is nothing to store.
  */
 export function nextBackfillCursor(options: {
   ingested: NostrEvent[];
@@ -439,7 +474,14 @@ export function nextBackfillCursor(options: {
   }
   if (newest === undefined) return options.previous;
   const oldestHeld = oldestCreatedAt(options.held);
-  if (oldestHeld !== undefined) return Math.min(newest, oldestHeld);
+  if (oldestHeld !== undefined)
+    return Math.max(
+      Math.min(newest, oldestHeld),
+      Math.min(
+        options.previous ?? Number.POSITIVE_INFINITY,
+        newest - BACKFILL_MAX_HOLD_BACK_SECONDS,
+      ),
+    );
   return Math.max(options.previous ?? newest, newest);
 }
 

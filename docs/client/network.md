@@ -26,7 +26,7 @@ interface NostrNetworkInterface {
 
 - **`publish`** — Publish signed events to the listed relays. Return per-relay `ok` / `message` so failures surface after commits and welcomes. Used by `KeyPackageManager` (key packages, deletes), each group's `GroupRuntime` (MLS traffic, app messages), and Welcome delivery (gift wraps).
 
-- **`request`** — One-shot REQ until EOSE; dedupe by `id` if you merge multiple filters. Used by `client.groups.connect()` / `connectAll()` to backfill a group's kind 445 history, one relay and one `limit`-sized page per call. The client keeps at most `limit` events of each response, but the adapter receives every response whole: to bound memory against a relay that ignores `limit`, stop collecting in the adapter once it has `limit` events.
+- **`request`** — One-shot REQ until EOSE; dedupe by `id` if you merge multiple filters. Used by `client.groups.connect()` / `connectAll()` to backfill a group's kind 445 history, one relay and one `limit`-sized page per call. Reject the promise when the relay fails, closes the request, or times out: a resolved empty array means the relay holds nothing more in that window, and the backfill records it as read. The client keeps at most `limit` events of each response, but the adapter receives every response whole: to bound memory against a relay that ignores `limit`, stop collecting in the adapter once it has `limit` events.
 
 - **`subscription`** — Live updates; emit one event per `next`. Used by `client.groups.connect()` / `connectAll()` for live kind 445 traffic and by `client.invites.listen()`.
 

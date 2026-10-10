@@ -144,17 +144,17 @@ export interface ConnectOptions {
    */
   fallbackRelays?: string[];
   /**
-   * Overlap, in seconds, re-fetched behind a group's stored backfill cursor to
-   * absorb relay clock skew and late-propagating events. Defaults to 600
-   * (10 minutes).
+   * Overlap, in seconds, re-fetched behind each relay's stored backfill
+   * cursor (and ahead of the live subscription's start) to absorb relay clock
+   * skew and late-propagating events. Defaults to 600 (10 minutes).
    */
   backfillSlackSeconds?: number;
   /** `limit` of each backfill page request. Defaults to 500. */
   backfillPageSize?: number;
   /**
    * Maximum pages fetched from each relay per connect. When a relay hits the
-   * cap the fetched events are still ingested, but the cursor is not advanced,
-   * so the remainder is retried on the next connect. Defaults to 50.
+   * cap the fetched events are still ingested, but its cursor is not
+   * advanced, so the remainder is retried on the next connect. Defaults to 50.
    */
   backfillMaxPages?: number;
 }
@@ -168,6 +168,26 @@ function positiveInteger(
   if (!Number.isSafeInteger(value) || value < 1)
     throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+/** Validates the backfill bounds of {@link ConnectOptions}, applying defaults. */
+function backfillBounds(options: ConnectOptions | undefined) {
+  const slack = options?.backfillSlackSeconds ?? DEFAULT_BACKFILL_SLACK_SECONDS;
+  if (!Number.isFinite(slack) || slack < 0)
+    throw new Error("backfillSlackSeconds must be a non-negative number");
+  return {
+    slack,
+    pageSize: positiveInteger(
+      options?.backfillPageSize,
+      DEFAULT_BACKFILL_PAGE_SIZE,
+      "backfillPageSize",
+    ),
+    maxPages: positiveInteger(
+      options?.backfillMaxPages,
+      DEFAULT_BACKFILL_MAX_PAGES,
+      "backfillMaxPages",
+    ),
+  };
 }
 
 /** Options for creating a new GroupsManager */
@@ -858,6 +878,7 @@ export class GroupsManager<
     groupId: Uint8Array | string,
     options?: ConnectOptions,
   ): Promise<Unsubscribable> {
+    backfillBounds(options);
     return this.#connectGroup(await this.get(groupId), options);
   }
 
@@ -869,6 +890,7 @@ export class GroupsManager<
    * whose `.unsubscribe()` tears down every connection and stops tracking.
    */
   connectAll(options?: ConnectOptions): Unsubscribable {
+    backfillBounds(options);
     const records = new Map<
       string,
       { controller: AbortController; sub?: Unsubscribable }
@@ -1063,7 +1085,7 @@ export class GroupsManager<
         seen.add(event.id);
         trusted.push(event);
       }
-      outcome.trusted.push(...trusted);
+      for (const event of trusted) outcome.trusted.push(event);
       if (!trusted.length) return outcome;
 
       // Result delivery uses the facade event only; consuming yields as well
@@ -1114,40 +1136,37 @@ export class GroupsManager<
     };
 
     // Backfill before subscribing (mirrors the proven attach order): the backlog
-    // ingests as one batch so out-of-order commits resolve together. The fetch
-    // is bounded by the group's cursor (newest ingested event from the last
+    // ingests as one batch so out-of-order commits resolve together. Each relay
+    // is fetched from its own cursor (newest event ingested from its last
     // complete backfill) minus a slack window, and paged so relay result caps
-    // cannot silently truncate it. With no cursor the full history is paged.
+    // cannot silently truncate it; a relay without a cursor is paged through
+    // its full history. Per-relay cursors let a failing or incomplete relay be
+    // re-read without holding back the others.
     try {
-      const slack =
-        options?.backfillSlackSeconds ?? DEFAULT_BACKFILL_SLACK_SECONDS;
-      if (!Number.isFinite(slack) || slack < 0)
-        throw new Error("backfillSlackSeconds must be a non-negative number");
-      const pageSize = positiveInteger(
-        options?.backfillPageSize,
-        DEFAULT_BACKFILL_PAGE_SIZE,
-        "backfillPageSize",
-      );
-      const maxPages = positiveInteger(
-        options?.backfillMaxPages,
-        DEFAULT_BACKFILL_MAX_PAGES,
-        "backfillMaxPages",
-      );
+      const { slack, pageSize, maxPages } = backfillBounds(options);
       const nowSeconds = () => Math.floor(Date.now() / 1000);
-      const cursor = await readBackfillCursor(
-        this.#ingestStateStore,
-        group.idStr,
-        nowSeconds(),
-      );
+      const cursors = new Map<string, number>();
+      const since = new Map<string, number>();
       // Per-relay progress of an earlier page-capped backfill: the walk skips
       // ranges already fetched, so history beyond the cap is reached over
       // several connects instead of re-reading the newest pages every time.
       const resume = new Map<string, BackfillProgress>();
       for (const relay of relays) {
+        const cursor = await readBackfillCursor(
+          this.#ingestStateStore,
+          group.idStr,
+          relay,
+          nowSeconds(),
+        );
+        if (cursor !== undefined) {
+          cursors.set(relay, cursor);
+          since.set(relay, Math.max(0, Math.floor(cursor - slack)));
+        }
         const progress = await readBackfillProgress(
           this.#ingestStateStore,
           group.idStr,
           relay,
+          nowSeconds(),
         );
         if (progress)
           resume.set(relay, {
@@ -1157,10 +1176,7 @@ export class GroupsManager<
       }
       const walkStart = nowSeconds();
       const backfill = await fetchPagedBackfill(this.network, relays, filter, {
-        since:
-          cursor === undefined
-            ? undefined
-            : Math.max(0, Math.floor(cursor - slack)),
+        since,
         pageSize,
         maxPages,
         resume,
@@ -1195,25 +1211,14 @@ export class GroupsManager<
           walkStart,
         );
 
-        // Advance the cursor only once the whole backfill window was fetched
-        // AND ingested; otherwise the next connect re-reads from the old
-        // cursor.
-        if (!backfill.complete) return;
-        const next = nextBackfillCursor({
-          ingested: drained.trusted,
+        await this.#advanceBackfillCursors(
+          group.idStr,
+          backfill,
+          drained.trusted,
           held,
-          previous: cursor,
-          nowSeconds: nowSeconds(),
-        });
-        if (next === undefined || next === cursor) return;
-        try {
-          await this.#ingestStateStore.setItem(
-            backfillCursorKey(group.idStr),
-            encodeBackfillCursor(next),
-          );
-        } catch (err) {
-          log("connect: failed to persist cursor for %s: %o", group.idStr, err);
-        }
+          cursors,
+          nowSeconds(),
+        );
       });
 
       // Backfill may itself have selected terminal state. Never seed a live route
@@ -1223,8 +1228,13 @@ export class GroupsManager<
         return noop;
       }
 
+      // The backfill covered everything before the walk began; the slack
+      // re-reads events that reached a relay late.
       const installed = this.network
-        .subscription(relays, filter)
+        .subscription(relays, {
+          ...filter,
+          since: Math.max(0, Math.floor(walkStart - slack)),
+        })
         .subscribe({ next: (event) => void admit([event]) });
       sub = installed;
       if (cancelled) installed.unsubscribe();
@@ -1232,6 +1242,44 @@ export class GroupsManager<
     } catch (error) {
       unsubscribe();
       throw error;
+    }
+  }
+
+  /**
+   * Advances the cursor of each relay whose backfill completed, from the
+   * events it returned that admission trusted. A relay that hit the page
+   * cap, saturated a second, or failed keeps its cursor, so its next connect
+   * re-reads the same window. Persistence failures are logged, never thrown.
+   */
+  async #advanceBackfillCursors(
+    groupIdHex: string,
+    backfill: PagedBackfillResult,
+    trusted: readonly NostrEvent[],
+    held: readonly NostrEvent[],
+    cursors: ReadonlyMap<string, number>,
+    nowSeconds: number,
+  ): Promise<void> {
+    const trustedIds = new Set(trusted.map((event) => event.id));
+    for (const outcome of backfill.relays) {
+      if (outcome.status !== "complete") continue;
+      const previous = cursors.get(outcome.relay);
+      const next = nextBackfillCursor({
+        ingested: (backfill.relayEvents.get(outcome.relay) ?? []).filter(
+          (event) => trustedIds.has(event.id),
+        ),
+        held,
+        previous,
+        nowSeconds,
+      });
+      if (next === undefined || next === previous) continue;
+      try {
+        await this.#ingestStateStore.setItem(
+          backfillCursorKey(groupIdHex, outcome.relay),
+          encodeBackfillCursor(next),
+        );
+      } catch (err) {
+        log("connect: failed to persist cursor for %s: %o", groupIdHex, err);
+      }
     }
   }
 

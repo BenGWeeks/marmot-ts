@@ -199,15 +199,21 @@ client.groups.on("unreadable", (groupId, event) => {
 
 ### Bounded backfill
 
-The backlog fetch is paged and bounded. Each relay is read newest-first in pages of `backfillPageSize` events (default 500), walking `until` backwards, so a relay's result cap cannot silently drop older events. After a backfill has been fully fetched and ingested, the client records a per-group cursor: the `created_at` of the newest ingested event. The next `connect()` for that group fetches only from `cursor - backfillSlackSeconds` (default 600 seconds). The first connect of a group has no cursor and pages through its full history.
+The backlog fetch is paged and bounded. Each relay is read newest-first in pages of `backfillPageSize` events (default 500), walking `until` backwards, so a relay's result cap cannot silently drop older events. After a relay's backfill has been fully fetched and ingested, the client records a cursor for that relay and group: the `created_at` of the newest ingested event it returned. The next `connect()` fetches that relay only from `cursor - backfillSlackSeconds` (default 600 seconds). The live subscription starts `backfillSlackSeconds` before the backfill began. A relay without a cursor (the first connect, or a relay added later) is paged through its full history.
 
-The cursor is stored in `ingestStateStore`. Pass a durable `ingestStateStore` to `MarmotClient` to keep backfill bounded across restarts; without one, the cursor lasts only for the current process. The cursor is not advanced when a relay hits `backfillMaxPages` (default 50 per relay), when a single second may hold more events than one response returned (timestamp paging cannot enumerate it), when a relay fails or answers outside the requested `since`/`until` window, when ingest fails, from events dated more than five minutes in the future, or past an event the group is still holding in memory: for a later retry (see `group.pendingEvents()`), or while its own commit is being published.
-
-A single-second page counts as possibly truncated when it holds at least `backfillPageSize` events, or at least 100 events and the relay has not returned a longer response during the same walk. Relays do not report their result cap, so one that caps responses below 100 events can still hide events that share a second.
+Cursors are stored in `ingestStateStore`. Pass a durable `ingestStateStore` to `MarmotClient` to keep backfill bounded across restarts; without one, cursors last only for the current process. A relay's cursor is not advanced when it hits `backfillMaxPages` (default 50 per relay), when a single second may hold more events than one response returned (timestamp paging cannot enumerate it), when the request fails or the relay answers outside the requested `since`/`until` window, when ingest fails, from events dated more than five minutes in the future, or past an event the group is still holding in memory: for a later retry (see `group.pendingEvents()`), or while its own commit is being published. Such a relay re-reads the same window on the next connect; the other relays still advance.
 
 Events are checked for a valid signature and this group's `h` tag before copies with the same id are merged, so a forged copy cannot displace the genuine event. Each relay contributes at most `backfillPageSize * backfillMaxPages` events per connect; when a relay returns more than `backfillPageSize` events for one page, only the newest `backfillPageSize` are kept and the rest are read by later pages.
 
 When a relay hits `backfillMaxPages`, the client also records how far that relay was read (one small record per group relay in `ingestStateStore`). The next `connect()` re-reads the newest events down to that range, then jumps below it and continues, so a history longer than the page cap is completed over successive connects. The record is removed once that relay's backfill completes.
+
+Limits:
+
+- The cursor follows `created_at`, which the publisher chooses. An event that reaches a relay more than `backfillSlackSeconds` after the date it carries can be missed by both the backfill and the live subscription.
+- Events held in memory hold the cursor back, so a restart re-fetches them, but by at most seven days below both the previous cursor and the newest fetched event. An undecryptable event dated far in the past therefore cannot force a full backfill on every connect.
+- A single-second page counts as possibly truncated when it holds at least `backfillPageSize` events, or at least 100 events and the relay has not returned a longer response during the same walk. Relays do not report their result cap, so one that caps responses below 100 events can still hide events that share a second.
+- A relay that fails on every connect is re-read from its old cursor (or in full) each time, bounded by `backfillMaxPages`.
+- The `request` adapter must reject when a relay fails or times out (see [network](/client/network)). An adapter that resolves `[]` instead makes the relay look empty, and a relay that stops part-way through its history may then be recorded as complete.
 
 ```typescript
 const connection = client.groups.connectAll({
