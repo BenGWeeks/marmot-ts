@@ -451,17 +451,25 @@ export async function fetchPagedBackfill(
  *
  * The cursor is the newest plausibly-dated ingested event; events dated more
  * than {@link BACKFILL_FUTURE_SKEW_SECONDS} ahead of `nowSeconds` are ignored.
- * Events the group is still holding only in memory (its ingestion pool and
- * capacity-refused input, see `MarmotGroup.pendingEvents()`, and input
- * retained while a commit publication or merge is in progress — none of it
- * durable across a restart) cap the cursor at their `created_at`, so the
- * next connect re-fetches them, but never by more than
- * {@link BACKFILL_MAX_HOLD_BACK_SECONDS} below the newest event. Returns
- * `undefined` when there is nothing to store.
+ * Events the group is still holding only in memory — none of it durable
+ * across a restart — cap the cursor at their `created_at`, so the next
+ * connect re-fetches them. Two kinds:
+ *
+ * - `held`: its ingestion pool and capacity-refused input (see
+ *   `MarmotGroup.pendingEvents()`), which may be undecryptable for good. They
+ *   hold the cursor back by at most {@link BACKFILL_MAX_HOLD_BACK_SECONDS}
+ *   below the newest event.
+ * - `retained`: input set aside while a commit publication or merge is in
+ *   progress, which is processed once it settles. That is bounded by the
+ *   publication, not by luck, so the hold-back has no floor: a first connect
+ *   with a long history must not skip the part of it still unprocessed.
+ *
+ * Returns `undefined` when there is nothing to store.
  */
 export function nextBackfillCursor(options: {
   ingested: NostrEvent[];
   held: readonly NostrEvent[];
+  retained?: readonly NostrEvent[];
   previous: number | undefined;
   nowSeconds: number;
 }): number | undefined {
@@ -474,12 +482,18 @@ export function nextBackfillCursor(options: {
   }
   if (newest === undefined) return options.previous;
   const oldestHeld = oldestCreatedAt(options.held);
-  if (oldestHeld !== undefined)
-    return Math.max(
-      Math.min(newest, oldestHeld),
-      newest - BACKFILL_MAX_HOLD_BACK_SECONDS,
-    );
-  return Math.max(options.previous ?? newest, newest);
+  const oldestRetained = oldestCreatedAt(options.retained ?? []);
+  if (oldestHeld === undefined && oldestRetained === undefined)
+    return Math.max(options.previous ?? newest, newest);
+  return Math.min(
+    oldestHeld === undefined
+      ? newest
+      : Math.max(
+          Math.min(newest, oldestHeld),
+          newest - BACKFILL_MAX_HOLD_BACK_SECONDS,
+        ),
+    oldestRetained === undefined ? newest : Math.min(newest, oldestRetained),
+  );
 }
 
 /** The oldest `created_at` among `events` at or after `from`, if any. */

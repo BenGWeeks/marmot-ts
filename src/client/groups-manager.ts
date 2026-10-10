@@ -1198,16 +1198,14 @@ export class GroupsManager<
         // undecryptable-so-far pool and capacity-refused input (pooled
         // without yielding a result), and input retained while a commit
         // publication or merge is in progress.
-        const held = [
-          ...group.pendingEvents(),
-          ...group.session.retainedEvents(),
-        ];
+        const held = group.pendingEvents();
+        const retained = group.session.retainedEvents();
 
         await this.#recordBackfillProgress(
           group,
           backfill,
           resume,
-          held,
+          [...held, ...retained],
           walkStart,
         );
 
@@ -1216,6 +1214,7 @@ export class GroupsManager<
           backfill,
           drained.trusted,
           held,
+          retained,
           cursors,
           nowSeconds(),
         );
@@ -1275,6 +1274,7 @@ export class GroupsManager<
     backfill: PagedBackfillResult,
     trusted: readonly NostrEvent[],
     held: readonly NostrEvent[],
+    retained: readonly NostrEvent[],
     cursors: ReadonlyMap<string, number>,
     nowSeconds: number,
   ): Promise<void> {
@@ -1287,6 +1287,7 @@ export class GroupsManager<
           (event) => trustedIds.has(event.id),
         ),
         held,
+        retained,
         previous,
         nowSeconds,
       });
