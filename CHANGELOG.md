@@ -42,6 +42,8 @@
 
 ### Fixed
 
+- Messages and commits sent while a group is settling after a commit are now always published once the group settles, even when the settle timer fires slightly early or retained messages are processed at the same time. Previously such sends could stay pending indefinitely.
+
 - Reject malformed encrypted group-image metadata in Welcome invitations before saving a group or consuming its single-use KeyPackage, including optional image components. Valid present and cleared images remain supported.
 
 - Closing a group-image service also cancels active uploads and queued image changes, wipes owned plaintext buffers, and prevents late callbacks from delivering an image after closure.
