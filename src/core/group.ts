@@ -25,6 +25,14 @@ import {
 import { getCredentialPubkey } from "./credential.js";
 import { CompleteKeyPackage } from "./key-package.js";
 
+/** Thrown when caller-supplied GroupContext extensions are invalid. */
+export class InvalidGroupContextExtensionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidGroupContextExtensionError";
+  }
+}
+
 export interface CreateGroupParams {
   /** Creator's complete key package (public + private) */
   creatorKeyPackage: CompleteKeyPackage;
@@ -67,12 +75,12 @@ export async function createGroup(
   const extensionTypes = new Set<number>();
   for (const extension of extensions) {
     if (extension.extensionType === appDataDictionaryExtensionType) {
-      throw new Error(
+      throw new InvalidGroupContextExtensionError(
         "app_data_dictionary must not be supplied in extensions; put dictionary data in components",
       );
     }
     if (extensionTypes.has(extension.extensionType)) {
-      throw new Error(
+      throw new InvalidGroupContextExtensionError(
         `Duplicate group context extension type: ${extension.extensionType}`,
       );
     }

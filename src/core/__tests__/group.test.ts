@@ -10,7 +10,11 @@ import {
 
 import { createCredential } from "../credential.js";
 import { generateKeyPackage } from "../key-package.js";
-import { createGroup, createSimpleGroup } from "../group.js";
+import {
+  createGroup,
+  createSimpleGroup,
+  InvalidGroupContextExtensionError,
+} from "../group.js";
 import { testAccount } from "../../__tests__/helpers/test-accounts.js";
 import { marmotRequiredCapabilitiesExtension } from "../capabilities.js";
 import { getMarmotGroupView } from "../client-state.js";
@@ -230,14 +234,16 @@ describe("group construction", () => {
       signer: account.signer,
     });
 
-    await expect(
-      createGroup({
-        creatorKeyPackage: kp,
-        components: [groupProfileEntry({ name: "Generated", description: "" })],
-        extensions,
-        ciphersuiteImpl: impl,
-      }),
-    ).rejects.toThrow(new Error(error));
+    const result = createGroup({
+      creatorKeyPackage: kp,
+      components: [groupProfileEntry({ name: "Generated", description: "" })],
+      extensions,
+      ciphersuiteImpl: impl,
+    });
+    await expect(result).rejects.toBeInstanceOf(
+      InvalidGroupContextExtensionError,
+    );
+    await expect(result).rejects.toThrow(error);
   });
 
   it("keeps the dictionary last through rename and admin metadata commits", async () => {
