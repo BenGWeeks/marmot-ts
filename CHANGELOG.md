@@ -42,6 +42,8 @@
 
 ### Fixed
 
+- New groups keep the app-data dictionary last in their GroupContext extensions, matching MDK so metadata updates such as renames and admin changes preserve extension order. Existing dictionary-first groups are not migrated and remain susceptible to metadata-update divergence with unpatched OpenMLS. Realignment remains a separate follow-up.
+
 - Reject malformed encrypted group-image metadata in Welcome invitations before saving a group or consuming its single-use KeyPackage, including optional image components. Valid present and cleared images remain supported.
 
 - Closing a group-image service also cancels active uploads and queued image changes, wipes owned plaintext buffers, and prevents late callbacks from delivering an image after closure.
@@ -67,6 +69,8 @@
 - Keep admin restrictions enforced when optional group metadata is malformed, and reject invalid group component updates before applying them.
 
 ### Breaking changes
+
+- `createGroup` rejects caller-supplied `app_data_dictionary` extensions and duplicate extension types, including duplicate `required_capabilities`. Put dictionary data in `components` and supply at most one extension of each type in `extensions`.
 
 - Reusable KeyPackages require the canonical empty-data `0x0004` component in the KeyPackage dictionary; legacy-only `0x000a` markers are deliberately rejected. Generate and republish current packages. Publications omit relay tags; destinations are retained locally across restarts for rotation and purge. Older route-less records need explicit rotation routes or locally supplied tracking routes for cleanup.
 - Publication identifiers (`clientId`, `identifier`, and rotation `d`) must be exactly 64 lowercase hex characters and invalid values reject before side effects. Generate 32 random bytes once, encode as lowercase hex and persist that slot instead of a device label. Publish under the new slot, then delete the old publication through known routes: a different `d` does not replace the old address. See the [publication slot migration](docs/core/key-packages.md#publication-slot-migration) for the create/purge and rotation paths.
