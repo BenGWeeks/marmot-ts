@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse a persisted installation signing key across KeyPackages so device app labels remain discoverable after invitations are consumed; init keys remain fresh.
+
 ### Added
 
 - Use `MarmotGroupEngine` from the engine entrypoint to manage group state without a Nostr transport, with changes applied after successful publication.

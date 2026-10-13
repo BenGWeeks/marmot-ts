@@ -148,6 +148,8 @@ export type MarmotClientOptions<
   inviteStore?: GenericKeyValueStore<StoredInviteEntry>;
   /** The crypto provider to use for cryptographic operations */
   cryptoProvider?: CryptoProvider;
+  /** Load a persisted installation signing identity for KeyPackages. */
+  getSignatureKeyPair?: import("./key-package-publisher.js").KeyPackagePublisherOptions["getSignatureKeyPair"];
   /** The nostr relay pool to use for the client. Should implement GroupNostrInterface for group operations. */
   network: NostrNetworkInterface;
   /** Optional forensic audit sink inherited by groups. Omitted by default. */
@@ -225,6 +227,8 @@ export class MarmotClient<
       signer: options.signer,
       network: options.network,
       clientId: options.clientId,
+      cryptoProvider: this.cryptoProvider,
+      getSignatureKeyPair: options.getSignatureKeyPair,
       verifyEvent,
     });
 

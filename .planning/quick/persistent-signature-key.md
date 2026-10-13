@@ -1,0 +1,1 @@
+Added optional validated signatureKeyPair and a client/publisher getSignatureKeyPair hook. Account identity proofs bind the selected key; init keys remain fresh. This preserves device labels after consuming invitations (Lightning Piggy #1492). Done outside GSD by Ben’s explicit bypass on 2026-10-13. Reference pointer updates skipped as requested; builds use the pinned MLS fork.
