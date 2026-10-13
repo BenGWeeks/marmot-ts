@@ -1,0 +1,3 @@
+Added optional validated signatureKeyPair and a client/publisher getSignatureKeyPair hook. Account identity proofs bind the selected key; init keys remain fresh. This preserves device labels after consuming invitations (Lightning Piggy #1492). Done outside GSD by Ben’s explicit bypass on 2026-10-13. Reference pointer updates skipped as requested; builds use the pinned MLS fork.
+
+Upstream master pins an unavailable ts-mls commit (bbc6e0cd). Building required the previously documented repair to published a7138e1 and its aligned lockfile (same repair as fix/ts-mls-submodule-pin). refs/marmot and refs/mdk pointers remain unchanged.

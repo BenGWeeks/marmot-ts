@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse a persisted installation signing key across KeyPackages so device app labels remain discoverable after invitations are consumed; init keys remain fresh.
+
 - Cancelling an image replacement or closing its image service now stops queued and preparing MLS image changes before publication, while ordinary group operations remain usable. Image changes already being published retain their publication outcome.
 
 - Keep verified image bytes intact when a cache entry is replaced or evicted while a read is awaiting contact policy; cancelled and closed reads release their private plaintext.
